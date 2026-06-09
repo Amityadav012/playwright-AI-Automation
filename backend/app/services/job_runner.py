@@ -15,6 +15,8 @@ from generators.test_plan_generator import generate_test_plan_for_intent
 from generators.testcase_generator import generate_testcases_for_plan
 from lib.contract import load_contract
 from lib.paths import app_output_dir, contracts_dir, ensure_app_dirs
+from lib.artifacts import spec_rel
+from lib.playwright_run import run_spec as run_playwright_spec
 from lib.workspace import ensure_workspace, get_plan, resolve_contract_path
 from pipeline import run_pipeline
 
@@ -127,6 +129,31 @@ def _run_testcase(request: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _run_playwright(request: dict[str, Any]) -> dict[str, Any]:
+    app_slug = request["app_slug"]
+    plan_id = request["plan_id"]
+    plan = get_plan(app_slug, plan_id)
+    if not plan:
+        raise ValueError(f"Plan not found: {plan_id}")
+
+    spec_path = request.get("spec_path")
+    if not spec_path:
+        specs = plan.get("specs") or []
+        if specs:
+            spec_path = specs[0].get("path")
+        if not spec_path:
+            spec_path = spec_rel(plan_id)
+
+    contract_path = _contract_path_for_app(app_slug)
+    contract = load_contract(contract_path)
+    return run_playwright_spec(
+        app_slug,
+        spec_path,
+        base_url=contract.base_url,
+        plan_id=plan_id,
+    )
+
+
 def _run_spec(request: dict[str, Any]) -> dict[str, Any]:
     app_slug = request["app_slug"]
     plan_id = request["plan_id"]
@@ -179,6 +206,7 @@ def _execute_job(job_type: JobType, request: dict[str, Any]) -> dict[str, Any]:
         "plan": _run_plan,
         "testcase": _run_testcase,
         "spec": _run_spec,
+        "run": _run_playwright,
         "pipeline": _run_pipeline,
     }
     return handlers[job_type](request)
@@ -277,6 +305,9 @@ def job_to_response(data: dict) -> JobResponse:
             artifact_path=result_data.get("artifact_path"),
             plan_id=result_data.get("plan_id"),
             flow_id=result_data.get("flow_id"),
+            exit_code=result_data.get("exit_code"),
+            passed=result_data.get("passed"),
+            report_path=result_data.get("report_path"),
         )
     return JobResponse(
         id=data["id"],

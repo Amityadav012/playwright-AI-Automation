@@ -28,11 +28,14 @@ export interface JobResult {
   artifact_path: string | null;
   plan_id: string | null;
   flow_id: string | null;
+  exit_code?: number | null;
+  passed?: boolean | null;
+  report_path?: string | null;
 }
 
 export interface JobResponse {
   id: string;
-  job_type: "scrape" | "plan" | "testcase" | "spec" | "pipeline";
+  job_type: "scrape" | "plan" | "testcase" | "spec" | "run" | "pipeline";
   status: "queued" | "running" | "completed" | "failed";
   created_at: string;
   started_at: string | null;
@@ -123,6 +126,11 @@ export const api = {
     request<JobResponse>(`/api/apps/${slug}/generate/spec`, {
       method: "POST",
       body: JSON.stringify({ app_slug: slug, plan_id }),
+    }),
+  runSpec: (slug: string, plan_id: string, spec_path?: string) =>
+    request<JobResponse>(`/api/apps/${slug}/run/spec`, {
+      method: "POST",
+      body: JSON.stringify({ app_slug: slug, plan_id, spec_path: spec_path ?? null }),
     }),
   getJob: (id: string) => request<JobResponse>(`/api/jobs/${id}`),
   listJobs: () => request<{ jobs: JobResponse[] }>("/api/jobs"),

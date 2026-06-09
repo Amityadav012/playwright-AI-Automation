@@ -16,7 +16,7 @@ from typing import Any
 import yaml
 from dotenv import load_dotenv
 
-from lib.assertions import map_assertions
+from lib.assertions import map_assertions, map_assertions_for_nav_loop
 from lib.contract import Contract, load_contract, page_id_to_pom_name
 from lib.llm import LLMClient
 from lib.artifacts import spec_path as canonical_spec_path
@@ -41,7 +41,7 @@ SCAFFOLD_FILES: dict[str, str] = {
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "@playwright/test": "^1.49.0",
+    "@playwright/test": "^1.60.0",
     "@types/node": "^22.0.0",
     "dotenv": "^16.4.0",
     "typescript": "^5.6.0"
@@ -121,7 +121,34 @@ def scaffold_app(root: Path, contract: Contract) -> None:
 
 
 def _escape_ts_string(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("'", "\\'")
+    value = value.replace("\\", "\\\\").replace("'", "\\'")
+    value = value.replace("\r\n", "\n").replace("\r", "\n")
+    value = value.replace("\n", "\\n")
+    return value
+
+
+def _normalize_playwright_selector(pw: str, *, page_var: str = "this.page") -> str:
+    """Rewrite contract selectors so embedded name strings are valid TS literals."""
+    pw = pw.strip().replace("page.", f"{page_var}.")
+
+    def fix_single_quoted(m: re.Match[str]) -> str:
+        inner = m.group(1)
+        return f"{{ name: '{_escape_ts_string(inner)}' }}"
+
+    def fix_double_quoted(m: re.Match[str]) -> str:
+        inner = m.group(1)
+        escaped = (
+            inner.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\r\n", "\n")
+            .replace("\r", "\n")
+            .replace("\n", "\\n")
+        )
+        return f'{{ name: "{escaped}" }}'
+
+    pw = re.sub(r"\{\s*name:\s*'(.*?)'\s*\}", fix_single_quoted, pw, flags=re.DOTALL)
+    pw = re.sub(r'\{\s*name:\s*"(.*?)"\s*\}', fix_double_quoted, pw, flags=re.DOTALL)
+    return pw
 
 
 def generate_pom(page: dict, class_name: str) -> str:
@@ -141,12 +168,14 @@ def generate_pom(page: dict, class_name: str) -> str:
         xpath = element.get("selectors", {}).get("xpath", "")
         label = element.get("label", eid)
 
+        role = element.get("role", "button")
         if pw:
-            locator_expr = pw.replace("page.", "this.page.")
+            locator_expr = _normalize_playwright_selector(pw)
         elif xpath:
             locator_expr = f"this.page.locator('xpath={_escape_ts_string(xpath)}')"
         else:
-            locator_expr = f"this.page.getByRole('button', {{ name: '{_escape_ts_string(label)}' }})"
+            pw_role = {"link": "link", "button": "button", "input": "textbox"}.get(role, "button")
+            locator_expr = f"this.page.getByRole('{pw_role}', {{ name: '{_escape_ts_string(label)}' }})"
 
         lines.append(f"  /** {element.get('description', label)} */")
         lines.append(f"  {method}(): Locator {{")
@@ -161,7 +190,7 @@ def generate_pom(page: dict, class_name: str) -> str:
             pw = field.get("selectors", {}).get("playwright", "")
             xpath = field.get("selectors", {}).get("xpath", "")
             if pw:
-                locator_expr = pw.replace("page.", "this.page.")
+                locator_expr = _normalize_playwright_selector(pw)
             elif xpath:
                 locator_expr = f"this.page.locator('xpath={_escape_ts_string(xpath)}')"
             else:
@@ -249,6 +278,8 @@ def _normalize_nav_link(
                 page_id=ref.get("page_id"),
             )
         if not element:
+            element = _find_element(contract, label=label, page_id="home")
+        if not element:
             element = _find_element(contract, label=label)
         if element:
             return _nav_link_from_element(contract, element)
@@ -260,20 +291,33 @@ def _normalize_nav_link(
     label = str(link.get("label") or "")
     route = str(link.get("route") or "")
     header = str(link.get("header") or label)
+    route_from_expected = False
 
     if link.get("expected_url"):
         from urllib.parse import urlparse
 
-        route = route or urlparse(str(link["expected_url"])).path or "/"
+        parsed = urlparse(str(link["expected_url"]))
+        route = parsed.path or "/"
+        if parsed.fragment:
+            route = f"/#{parsed.fragment}"
+        route_from_expected = True
 
     element_id = link.get("element_id")
-    if element_id and (not label or not route or route == "/"):
-        element = _find_element(contract, element_id=str(element_id))
+    if element_id:
+        element = None
+        home = contract.get_page("home")
+        if home:
+            for el in home.get("elements", []):
+                if el.get("element_id") == str(element_id):
+                    element = el
+                    break
+        if not element:
+            element = _find_element(contract, element_id=str(element_id), page_id="home")
         if element:
-            enriched = _nav_link_from_element(contract, element)
-            label = label or enriched["label"]
-            route = route if route and route != "/" else enriched["route"]
-            header = header or enriched["header"]
+            label = label or element.get("label", "")
+            header = header or label
+            if not route_from_expected and not route:
+                route = _nav_link_from_element(contract, element)["route"]
 
     if ref and isinstance(ref, dict) and ref.get("element_id") and not label:
         element = _find_element(
@@ -289,7 +333,19 @@ def _normalize_nav_link(
 
     if not label and not route:
         return None
-    return {"label": label, "route": route or "/", "header": header or label}
+    out: dict[str, str] = {
+        "label": label,
+        "route": route or "/",
+        "header": header or label,
+    }
+    if element_id:
+        out["element_id"] = str(element_id)
+    if isinstance(link, dict):
+        if link.get("assert"):
+            out["assert"] = link["assert"]
+        if link.get("raw_href"):
+            out["raw_href"] = str(link["raw_href"])
+    return out
 
 
 def _collect_nav_links(case: dict, contract: Contract) -> list[dict[str, str]]:
@@ -333,6 +389,212 @@ def _build_nav_links_constant(flow: dict, contract: Contract) -> str:
         entries.append(f"  {{ label: '{label}', route: '{route}', header: '{header}' }},")
 
     return "export const NAV_LINKS = [\n" + "\n".join(entries) + "\n] as const\n\n"
+
+
+def _resolve_start_path(flow: dict, contract: Contract, module: str) -> str:
+    ui_pages = flow.get("ui_pages") or []
+    if "HomePage" in ui_pages:
+        home = contract.get_page("home")
+        if home:
+            return home.get("path", "/") or "/"
+    for case in flow.get("cases", []):
+        for ref in case.get("element_refs") or []:
+            if not isinstance(ref, dict):
+                continue
+            page = contract.get_page(_normalize_page_id(ref.get("page_id", "")))
+            if page:
+                return page.get("path", "/") or "/"
+    pages = contract.pages_for_module(module)
+    if pages:
+        return pages[0].get("path", "/") or "/"
+    return "/"
+
+
+def _resolve_click_element(
+    contract: Contract,
+    ref: dict,
+    *,
+    home_page: dict | None,
+    label_fallback: str | None = None,
+) -> dict | None:
+    """Resolve a contract element on home by id, then by label."""
+    eid = ref.get("element_id")
+    if home_page and eid:
+        for el in home_page.get("elements", []):
+            if el.get("element_id") == eid:
+                return el
+    if home_page and label_fallback:
+        for el in home_page.get("elements", []):
+            if el.get("label", "").strip().lower() == label_fallback.strip().lower():
+                return el
+    if eid:
+        page = contract.get_page(_normalize_page_id(ref.get("page_id", "")))
+        if page:
+            for el in page.get("elements", []):
+                if el.get("element_id") == eid:
+                    return el
+    return _find_element(contract, element_id=eid) if eid else None
+
+
+def _structured_nav_links(case: dict) -> bool:
+    raw = case.get("nav_links") or []
+    return bool(raw) and all(isinstance(x, dict) for x in raw)
+
+
+def _resolve_home_nav_element(
+    contract: Contract,
+    home_page: dict | None,
+    norm: dict[str, str],
+) -> dict | None:
+    """Resolve a home-page element for a structured nav link (skip off-home targets)."""
+    home_page = home_page or contract.get_page("home")
+    if not home_page:
+        return None
+
+    eid = norm.get("element_id")
+    label = (norm.get("label") or "").strip()
+    route = norm.get("route", "/")
+
+    if eid:
+        for el in home_page.get("elements", []):
+            if el.get("element_id") == eid:
+                return el
+
+    if label:
+        matches = [
+            el
+            for el in home_page.get("elements", [])
+            if (el.get("label") or "").strip().lower() == label.lower()
+        ]
+        link_matches = [el for el in matches if el.get("role") == "link"]
+        if link_matches:
+            return link_matches[0]
+        if matches:
+            return matches[0]
+
+    if route and route != "/":
+        from urllib.parse import urlparse
+
+        for el in home_page.get("elements", []):
+            if el.get("role") != "link":
+                continue
+            href = el.get("href") or ""
+            tp = el.get("target_path") or ""
+            if tp and tp.rstrip("/") == route.rstrip("/"):
+                return el
+            if href:
+                parsed = urlparse(href)
+                path = (parsed.path or "/") + (
+                    f"#{parsed.fragment}" if parsed.fragment else ""
+                )
+                if path == route or href.endswith(route):
+                    return el
+    return None
+
+
+def _href_locator_suffix(el: dict) -> str | None:
+    from urllib.parse import urlparse
+
+    href = el.get("href") or ""
+    if not href:
+        return None
+    parsed = urlparse(href)
+    if parsed.fragment and (not parsed.path or parsed.path in ("", "/")):
+        return f"#{parsed.fragment}"
+    if parsed.path and parsed.path not in ("", "/"):
+        return parsed.path
+    return None
+
+
+def _click_expr_for_nav_element(el: dict, route: str) -> str | None:
+    suffix = _href_locator_suffix(el)
+    label = _escape_ts_string(el.get("label", ""))
+    role = el.get("role", "link")
+
+    if suffix and role == "link":
+        if suffix.startswith("#"):
+            loc = f"page.locator('a[href$=\"{suffix}\"], a[href*=\"{suffix}\"]')"
+        else:
+            loc = f"page.locator('a[href=\"{suffix}\"], a[href$=\"{suffix}\"]')"
+        if label:
+            loc = (
+                f"{loc}.or(page.getByRole('link', "
+                f"{{ name: '{label}', exact: true }}))"
+            )
+        return f"{loc}.first().click()"
+
+    if route and route != "/" and role == "link":
+        route_esc = _escape_ts_string(route)
+        loc = f"page.locator('a[href=\"{route_esc}\"], a[href$=\"{route_esc}\"]')"
+        if label:
+            loc = (
+                f"{loc}.or(page.getByRole('link', "
+                f"{{ name: '{label}', exact: true }}))"
+            )
+        return f"{loc}.first().click()"
+
+    return _click_expr_for_element(el)
+
+
+def _url_assert_from_contract(assert_meta: dict, route: str) -> str:
+    kind = assert_meta.get("kind", "")
+    value = _escape_ts_string(str(assert_meta.get("value", "")))
+    if kind == "hash":
+        return f"await expect(page).toHaveURL((url) => url.hash === '{value}');"
+    if kind == "pathname":
+        return (
+            f"await expect(page).toHaveURL((url) => "
+            f"url.pathname === '{value}' || url.pathname.startsWith('{value}'));"
+        )
+    if kind == "same_page":
+        return "await expect(page).toHaveURL(/./);"
+    route_esc = _escape_ts_string(route)
+    return (
+        f"await expect(page).toHaveURL((url) => "
+        f"url.pathname === '{route_esc}' || url.pathname.startsWith('{route_esc}'));"
+    )
+
+
+def _url_assert_for_nav(route: str, el: dict | None, assert_meta: dict | None = None) -> str:
+    if assert_meta:
+        return _url_assert_from_contract(assert_meta, route)
+    from urllib.parse import urlparse
+
+    extras: list[str] = []
+    if el:
+        href = el.get("href") or ""
+        frag = el.get("fragment") or (urlparse(href).fragment if href else "")
+        if frag:
+            extras.append(f"url.hash === '#{_escape_ts_string(frag)}'")
+        tp = el.get("target_path") or ""
+        if tp.startswith("/#"):
+            extras.append(f"url.hash === '{_escape_ts_string(tp[1:])}'")
+
+    extra_clause = f" || {' || '.join(extras)}" if extras else ""
+    route_esc = _escape_ts_string(route)
+    return (
+        f"await expect(page).toHaveURL((url) => "
+        f"url.pathname === '{route_esc}' || url.pathname.startsWith('{route_esc}')"
+        f"{extra_clause});"
+    )
+
+
+def _click_expr_for_element(el: dict) -> str | None:
+    xpath = el.get("selectors", {}).get("xpath", "")
+    pw = el.get("selectors", {}).get("playwright", "")
+    if pw:
+        return f"{_normalize_playwright_selector(pw, page_var='page')}.first().click()"
+    if xpath:
+        return f"page.locator('xpath={_escape_ts_string(xpath)}').first().click()"
+    label = el.get("label", "")
+    role = el.get("role", "link")
+    pw_role = {"link": "link", "button": "button", "input": "textbox"}.get(role, "button")
+    if label:
+        return (
+            f"page.getByRole('{pw_role}', "
+            f"{{ name: '{_escape_ts_string(label)}', exact: true }}).first().click()"
+        )
+    return None
 
 
 def generate_spec(
@@ -382,8 +644,7 @@ def generate_spec(
         describe_lines.append(f"  test.use({{ storageState: storageStatePath('{actor}') }})")
         describe_lines.append("")
 
-    first_page = contract.pages_for_module(module)
-    start_path = first_page[0].get("path", "/") if first_page else "/"
+    start_path = _resolve_start_path(flow, contract, module)
     describe_lines.append("  test.beforeEach(async ({ page }) => {")
     describe_lines.append(f"    await page.goto('{start_path or '/'}')")
     describe_lines.append("  })")
@@ -405,30 +666,67 @@ def generate_spec(
             title = case.get("title", case_id)
             describe_lines.append(f"  test('{case_id}: {title}', async ({{ page }}) => {{")
 
+            element_refs = [
+                r for r in case.get("element_refs", [])[:30] if isinstance(r, dict)
+            ]
             nav_links = _collect_nav_links(case, contract)
-            if nav_links:
+            raw_nav_labels = [x for x in case.get("nav_links") or [] if isinstance(x, str)]
+            home_page = contract.get_page("home")
+            clicks_written = 0
+
+            if module == "navigation" and _structured_nav_links(case) and nav_links:
+                for norm in nav_links:
+                    route = norm.get("route", "/")
+                    if route == "/":
+                        continue
+                    element = _resolve_home_nav_element(contract, home_page, norm)
+                    if not element:
+                        log.warning(
+                            "Skipping nav link %s (%s): not on home page",
+                            norm.get("label"),
+                            norm.get("element_id"),
+                        )
+                        continue
+                    click_expr = _click_expr_for_element(element)
+                    if not click_expr:
+                        click_expr = _click_expr_for_nav_element(element, route)
+                    if not click_expr:
+                        continue
+                    describe_lines.append(f"    await page.goto('{start_path or '/'}')")
+                    describe_lines.append(f"    await {click_expr}")
+                    describe_lines.append(
+                        f"    {_url_assert_for_nav(route, element, norm.get('assert'))}"
+                    )
+                    describe_lines.append("    await expect(page).toHaveTitle(/.+/);")
+                describe_lines.append("  })")
+                describe_lines.append("")
+                continue
+
+            for i, ref in enumerate(element_refs):
+                label_fb = raw_nav_labels[i] if i < len(raw_nav_labels) else None
+                element = _resolve_click_element(
+                    contract, ref, home_page=home_page, label_fallback=label_fb
+                )
+                if element:
+                    click_expr = _click_expr_for_element(element)
+                    if click_expr:
+                        describe_lines.append(f"    await page.goto('{start_path or '/'}')")
+                        describe_lines.append(f"    await {click_expr}")
+                        describe_lines.append("    await expect(page).toHaveTitle(/.+/);")
+                        clicks_written += 1
+
+            if clicks_written == 0 and nav_links:
                 describe_lines.append("    for (const link of NAV_LINKS) {")
-                describe_lines.append("      await page.goto(link.route)")
-                for line in map_assertions(
-                    case.get("assertions", ["page_loads"]),
-                    {"route": "", "header": ""},
+                describe_lines.append(f"      await page.goto('{start_path or '/'}')")
+                describe_lines.append(
+                    "      await page.getByRole('link', { name: link.label, exact: true }).first().click();"
+                )
+                for line in map_assertions_for_nav_loop(
+                    case.get("assertions", ["page_loads"])
                 ):
                     describe_lines.append(f"      {line}")
                 describe_lines.append("    }")
-            else:
-                for ref in case.get("element_refs", [])[:20]:
-                    if not isinstance(ref, dict):
-                        continue
-                    eid = ref.get("element_id")
-                    page_data = contract.get_page(_normalize_page_id(ref.get("page_id", "")))
-                    if page_data:
-                        for el in page_data.get("elements", []):
-                            if el.get("element_id") == eid:
-                                pw = el.get("selectors", {}).get("playwright", "")
-                                if pw:
-                                    describe_lines.append(f"    await {pw}.click();")
-                                break
-
+            elif clicks_written == 0:
                 for line in map_assertions(case.get("assertions", ["page_loads"])):
                     describe_lines.append(f"    {line}")
 

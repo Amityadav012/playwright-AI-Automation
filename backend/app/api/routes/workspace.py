@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException
 from app.models.schemas import (
     ContractInfoResponse,
     PlanJobRequest,
+    RunSpecJobRequest,
     SpecJobRequest,
     TestcaseJobRequest,
     WorkspaceResponse,
@@ -92,5 +93,20 @@ def generate_spec(slug: str, body: SpecJobRequest):
         raise HTTPException(status_code=400, detail="plan_id is required")
     try:
         return job_runner.start_job("spec", body.model_dump())
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/{slug}/run/spec", status_code=202)
+def run_spec(slug: str, body: RunSpecJobRequest):
+    if body.app_slug != slug:
+        raise HTTPException(status_code=400, detail="app_slug mismatch")
+    if not body.plan_id:
+        raise HTTPException(status_code=400, detail="plan_id is required")
+    info = _contract_info(slug)
+    if not info.exists:
+        raise HTTPException(status_code=404, detail="Contract not found — extract contract first")
+    try:
+        return job_runner.start_job("run", body.model_dump())
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

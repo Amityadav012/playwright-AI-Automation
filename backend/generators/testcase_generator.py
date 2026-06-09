@@ -56,6 +56,50 @@ def _extract_flow_from_llm_result(result: Any) -> dict[str, Any] | None:
     return None
 
 
+def _expected_url_for_nav_entry(base_url: str, entry: dict) -> str:
+    target = entry.get("target_path") or "/"
+    base = base_url.rstrip("/")
+    if target.startswith("/#"):
+        return f"{base}{target[1:]}"
+    if target == "/":
+        return f"{base}/"
+    return f"{base}{target}"
+
+
+def _nav_links_from_home_navigation(contract: Contract) -> list[dict[str, Any]]:
+    links: list[dict[str, Any]] = []
+    for entry in contract.home_navigation:
+        element_id = entry.get("element_id")
+        if not element_id:
+            continue
+        target = entry.get("target_path") or "/"
+        links.append({
+            "element_id": element_id,
+            "action": "click",
+            "label": entry.get("label", ""),
+            "route": target,
+            "expected_url": _expected_url_for_nav_entry(contract.base_url, entry),
+            "assert": entry.get("assert"),
+            "raw_href": entry.get("raw_href"),
+        })
+    return links
+
+
+def _apply_home_navigation(flow: dict[str, Any], contract: Contract) -> dict[str, Any]:
+    if flow.get("module") != "navigation" or not contract.home_navigation:
+        return flow
+    nav_from_contract = _nav_links_from_home_navigation(contract)
+    if not nav_from_contract:
+        return flow
+    for case in flow.get("cases", []):
+        case["nav_links"] = nav_from_contract
+        case["element_refs"] = [
+            {"element_id": n["element_id"], "action": "click", "page_id": "home"}
+            for n in nav_from_contract
+        ]
+    return flow
+
+
 def _normalize_flow(flow: dict[str, Any], module: str) -> dict[str, Any]:
     flow = dict(flow)
     flow["module"] = flow.get("module") or module
@@ -116,6 +160,7 @@ def generate_testcases_for_plan(
         )
 
     flow = _normalize_flow(flow, module)
+    flow = _apply_home_navigation(flow, contract)
     flow["flow_id"] = plan_id
 
     out_dir = root / "tests" / "testcases" / plan_id

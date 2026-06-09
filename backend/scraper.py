@@ -16,7 +16,7 @@ from urllib.parse import urljoin, urlparse
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
-CONTRACT_VERSION = "1.0.0"
+CONTRACT_VERSION = "1.1.0"
 
 from bs4 import BeautifulSoup
 from lxml import etree
@@ -61,6 +61,7 @@ class Link:
     crawlable: bool                 # safe to enqueue for multi-page crawl
     opens_new_tab: bool = False
     aria_label: Optional[str] = None
+    region: str = "unknown"         # header | footer | nav | content | unknown
 
 @dataclass
 class Clickable:
@@ -160,6 +161,13 @@ def extract_links_from_page(page: Page, page_url: str, base_domain: str) -> list
                 items.push(item);
             };
 
+            const regionFor = (el) => {
+                const nav = el.closest('header, footer, nav, [role="navigation"]');
+                if (!nav) return 'content';
+                const tag = nav.tagName.toLowerCase();
+                return tag === 'nav' ? 'nav' : tag;
+            };
+
             document.querySelectorAll('a[href], area[href], [role="link"][href]').forEach((el) => {
                 const raw = el.getAttribute('href') || '';
                 push({
@@ -169,6 +177,7 @@ def extract_links_from_page(page: Page, page_url: str, base_domain: str) -> list
                     text: (el.innerText || '').trim().slice(0, 120),
                     aria_label: el.getAttribute('aria-label'),
                     opens_new_tab: el.target === '_blank' || el.getAttribute('rel')?.includes('noopener'),
+                    region: regionFor(el),
                 });
             });
 
@@ -185,6 +194,7 @@ def extract_links_from_page(page: Page, page_url: str, base_domain: str) -> list
                     text,
                     aria_label: el.getAttribute('aria-label'),
                     opens_new_tab: false,
+                    region: regionFor(el),
                 });
             });
 
@@ -216,6 +226,7 @@ def extract_links_from_page(page: Page, page_url: str, base_domain: str) -> list
             crawlable=crawlable,
             opens_new_tab=bool(item.get("opens_new_tab")),
             aria_label=item.get("aria_label"),
+            region=item.get("region") or "unknown",
         ))
     return links
 
@@ -253,6 +264,36 @@ def _clean_url(url: str) -> str:
     return parsed._replace(query="", fragment="").geturl().rstrip("/")
 
 
+def _normalize_href_for_storage(resolved: str, raw: str) -> str:
+    """Store href with fragment preserved (unlike _clean_url used for crawl dedup)."""
+    if not resolved and not raw:
+        return ""
+    primary = resolved or raw
+    parsed = urlparse(primary)
+    frag = parsed.fragment
+    raw = (raw or "").strip()
+    if not frag and raw:
+        if raw.startswith("/#"):
+            frag = raw[2:].split("?")[0]
+        elif raw.startswith("#"):
+            frag = raw[1:].split("?")[0]
+    if frag:
+        return parsed._replace(query="", fragment=frag).geturl()
+    return parsed._replace(query="", fragment="").geturl().rstrip("/")
+
+
+def _fragment_from_href(href: str, raw_href: str) -> Optional[str]:
+    parsed = urlparse(href or raw_href)
+    if parsed.fragment:
+        return parsed.fragment
+    raw = (raw_href or "").strip()
+    if raw.startswith("/#"):
+        return raw[2:].split("?")[0] or None
+    if raw.startswith("#"):
+        return raw[1:].split("?")[0] or None
+    return None
+
+
 def _page_path(url: str, base_url: str) -> str:
     base = _clean_url(base_url)
     full = _clean_url(url)
@@ -274,7 +315,9 @@ def _element_label(tag: str, text: str, aria_label: Optional[str], name: Optiona
 
 
 def _escape_js_string(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("'", "\\'")
+    value = value.replace("\\", "\\\\").replace("'", "\\'")
+    value = value.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n")
+    return value
 
 
 def _build_playwright_selector(
@@ -285,11 +328,14 @@ def _build_playwright_selector(
     name: Optional[str],
     element_id: Optional[str],
     data_testid: Optional[str],
+    raw_href: Optional[str] = None,
 ) -> str:
     if data_testid:
         return f"page.getByTestId('{_escape_js_string(data_testid)}')"
     if element_id:
         return f"page.locator('#{_escape_js_string(element_id)}')"
+    if raw_href and role == "link" and tag == "a":
+        return f"page.locator('a[href=\"{_escape_js_string(raw_href)}\"]')"
     if name and tag in ("input", "select", "textarea"):
         return f"page.locator('[name=\"{_escape_js_string(name)}\"]')"
     visible_label = aria_label or label
@@ -303,7 +349,7 @@ def _build_playwright_selector(
         }.get(role, "button")
         return (
             f"page.getByRole('{playwright_role}', "
-            f"{{ name: '{_escape_js_string(visible_label)}' }})"
+            f"{{ name: '{_escape_js_string(visible_label)}', exact: true }})"
         )
     return ""
 
@@ -344,15 +390,98 @@ def _is_noise_element(label: str, aria_label: Optional[str]) -> bool:
     return False
 
 
-def _target_path_from_href(href: str, base_url: str) -> Optional[str]:
-    if not href:
+def _target_path_from_href(
+    href: str,
+    base_url: str,
+    *,
+    raw_href: str = "",
+    category: str = "",
+) -> Optional[str]:
+    if not href and not raw_href:
         return None
-    cleaned = _clean_url(href)
+
+    raw = (raw_href or "").strip()
+    if raw.startswith("/#") or (raw.startswith("#") and category == "internal_hash"):
+        frag = raw.lstrip("/#").split("?")[0]
+        return f"/#{frag}" if frag else None
+
+    if category == "internal_hash":
+        frag = _fragment_from_href(href, raw_href)
+        if frag:
+            return f"/#{frag}"
+
+    cleaned = _clean_url(href or raw)
     base = _clean_url(base_url)
     if not cleaned.startswith(base):
         return None
     path = _page_path(cleaned, base)
-    return path if path != "/" or "#" not in href else None
+    return path if path != "/" else None
+
+
+HOME_NAV_REGIONS = frozenset({"header", "footer", "nav"})
+
+HOME_NAV_SKIP_LABELS = frozenset({
+    "skip to content",
+    "skip to main",
+    "skip to main content",
+})
+
+
+def _assert_spec_for_link(
+    raw_href: str,
+    target_path: Optional[str],
+    category: str,
+) -> dict:
+    if target_path and target_path.startswith("/#"):
+        return {"kind": "hash", "value": f"#{target_path[2:]}"}
+    if category == "internal_hash":
+        frag = _fragment_from_href("", raw_href)
+        if frag:
+            return {"kind": "hash", "value": f"#{frag}"}
+    if target_path and target_path not in ("/", ""):
+        return {"kind": "pathname", "value": target_path}
+    return {"kind": "same_page", "value": "/"}
+
+
+def build_home_navigation(home_elements: list[dict]) -> list[dict]:
+    """Build top-level home_navigation from home page header/footer/nav links."""
+    entries: list[dict] = []
+    seen: set[str] = set()
+
+    for el in home_elements:
+        if el.get("role") != "link":
+            continue
+        region = el.get("region", "unknown")
+        if region not in HOME_NAV_REGIONS:
+            continue
+        category = el.get("category", "")
+        if category in ("mailto", "tel", "external"):
+            continue
+        raw_href = (el.get("raw_href") or "").strip()
+        if raw_href.lower().startswith(("mailto:", "tel:", "javascript:")):
+            continue
+        if raw_href in ("", "#"):
+            continue
+
+        label = (el.get("label") or "").strip()
+        if label.lower() in HOME_NAV_SKIP_LABELS or label.lower().startswith("skip to"):
+            continue
+
+        key = f"{label}|{raw_href}"
+        if key in seen:
+            continue
+        seen.add(key)
+
+        target_path = el.get("target_path")
+        entries.append({
+            "element_id": el.get("element_id"),
+            "label": el.get("label"),
+            "raw_href": raw_href,
+            "target_path": target_path,
+            "assert": _assert_spec_for_link(raw_href, target_path, category),
+        })
+
+    return entries
 
 
 def build_unified_elements(
@@ -398,7 +527,14 @@ def build_unified_elements(
         )
         role = "link" if link.tag == "a" else "button"
         category = "navigation" if link.category in ("internal_path", "navigation_button") else link.category
-        target_path = _target_path_from_href(link.href, base_url)
+        stored_href = _normalize_href_for_storage(link.href, link.raw_href)
+        target_path = _target_path_from_href(
+            stored_href,
+            base_url,
+            raw_href=link.raw_href,
+            category=link.category,
+        )
+        fragment = _fragment_from_href(stored_href, link.raw_href)
         element_id = f"{_slugify(label or link.category)}_{index}"
 
         add_element({
@@ -408,13 +544,23 @@ def build_unified_elements(
             "label": label,
             "description": "",
             "category": category,
-            "href": _clean_url(link.href) if link.href else "",
+            "href": stored_href,
+            "raw_href": link.raw_href or "",
+            "fragment": fragment,
             "target_path": target_path,
+            "region": link.region or "unknown",
             "actions": ["click"],
             "opens_new_tab": link.opens_new_tab,
             "selectors": {
                 "playwright": _build_playwright_selector(
-                    link.tag, role, label, link.aria_label, None, None, None,
+                    link.tag,
+                    role,
+                    label,
+                    link.aria_label,
+                    None,
+                    None,
+                    None,
+                    raw_href=link.raw_href or None,
                 ),
                 "xpath": xpath,
             },
@@ -441,7 +587,10 @@ def build_unified_elements(
         if clickable.type == "link":
             category = "navigation"
         element_id = f"{_slugify(label or clickable.type)}_{index}"
-        target_path = _target_path_from_href(clickable.href or "", base_url)
+        clickable_href = clickable.href or ""
+        stored_href = _normalize_href_for_storage(clickable_href, clickable_href)
+        target_path = _target_path_from_href(stored_href, base_url, category=category)
+        fragment = _fragment_from_href(stored_href, clickable_href)
 
         add_element({
             "element_id": element_id,
@@ -450,8 +599,11 @@ def build_unified_elements(
             "label": label,
             "description": "",
             "category": category,
-            "href": _clean_url(clickable.href) if clickable.href else "",
+            "href": stored_href,
+            "raw_href": clickable_href,
+            "fragment": fragment,
             "target_path": target_path,
+            "region": "unknown",
             "actions": ["click"] if clickable.type in ("link", "button") else ["fill", "type"],
             "input_type": clickable.type if clickable.type == "input" else None,
             "name": clickable.name,
@@ -1118,6 +1270,12 @@ def save_sitemap(sitemap: SiteMap, output_path: str = "site_map.json"):
             "forms": p.forms,
         })
 
+    home_elements: list[dict] = []
+    for page in contract_pages:
+        if page.get("path") == "/":
+            home_elements = page.get("elements", [])
+            break
+
     data = {
         "contract_version": CONTRACT_VERSION,
         "application": {
@@ -1131,6 +1289,7 @@ def save_sitemap(sitemap: SiteMap, output_path: str = "site_map.json"):
             "wait_until": sitemap.wait_until,
         },
         "route_index": route_index,
+        "home_navigation": build_home_navigation(home_elements),
         "pages": contract_pages,
     }
 

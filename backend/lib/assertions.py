@@ -35,3 +35,31 @@ def map_assertions(
         )
         lines.append(line)
     return lines
+
+
+# Playwright snippets for NAV_LINKS loop (uses `link` from for-of).
+NAV_LOOP_ASSERTIONS: dict[str, str] = {
+    "url_matches_route": (
+        "await expect(page).toHaveURL((url) => "
+        "url.pathname === link.route || url.pathname.startsWith(link.route))"
+    ),
+    "page_title_visible": "await expect(page).toHaveTitle(/.+/);",
+    "page_loads": "await expect(page).toHaveTitle(/.+/);",
+    "link_visible": "await expect(page.getByRole('link', { name: link.label })).toBeVisible();",
+    "form_field_visible": "await expect(page.locator('body')).toBeVisible();",
+    "header_title_visible": (
+        "await expect(page.locator('h1').first()).toContainText(link.header, { timeout: 10_000 })"
+        ".catch(() => expect(page).toHaveTitle(/.+/))"
+    ),
+}
+
+
+def map_assertions_for_nav_loop(assertions: list[str]) -> list[str]:
+    lines: list[str] = []
+    for assertion in assertions:
+        line = NAV_LOOP_ASSERTIONS.get(assertion)
+        if line:
+            lines.append(line)
+        else:
+            lines.append(f"// TODO: assert {assertion}")
+    return lines

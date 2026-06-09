@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-SUPPORTED_CONTRACT_VERSION = "1.0.0"
+SUPPORTED_CONTRACT_VERSIONS = frozenset({"1.0.0", "1.1.0"})
+SUPPORTED_CONTRACT_VERSION = "1.1.0"
 
 MODULE_PAGE_TYPES: dict[str, set[str]] = {
     "auth": {"login"},
@@ -16,6 +17,22 @@ MODULE_PAGE_TYPES: dict[str, set[str]] = {
 }
 
 DEFAULT_MODULES = ("auth", "navigation", "content")
+
+
+def _slim_element(e: dict) -> dict:
+    return {
+        "element_id": e.get("element_id"),
+        "role": e.get("role"),
+        "label": e.get("label"),
+        "description": e.get("description"),
+        "category": e.get("category"),
+        "target_path": e.get("target_path"),
+        "href": e.get("href"),
+        "raw_href": e.get("raw_href"),
+        "fragment": e.get("fragment"),
+        "region": e.get("region"),
+        "selectors": e.get("selectors", {}),
+    }
 
 
 @dataclass
@@ -44,14 +61,18 @@ class Contract:
         return self.raw.get("pages", [])
 
     @property
+    def home_navigation(self) -> list[dict]:
+        return self.raw.get("home_navigation", [])
+
+    @property
     def scraped_at(self) -> str:
         return self.raw.get("extraction_metadata", {}).get("scraped_at", "")
 
     def validate(self) -> None:
-        if self.version != SUPPORTED_CONTRACT_VERSION:
+        if self.version not in SUPPORTED_CONTRACT_VERSIONS:
             raise ValueError(
                 f"Unsupported contract_version {self.version!r}; "
-                f"expected {SUPPORTED_CONTRACT_VERSION!r}"
+                f"expected one of {sorted(SUPPORTED_CONTRACT_VERSIONS)!r}"
             )
         if not self.base_url:
             raise ValueError("Contract missing application.base_url")
@@ -73,10 +94,15 @@ class Contract:
                 or p.get("page_id") in {"privacypolicy", "help", "faq", "screenreaderaccess"}
             ]
         if module == "navigation":
-            matched = list({p["page_id"]: p for p in matched + self.pages if p.get("page_type") == "nav"}.values())
-            sitemap = self.get_page("sitemap")
-            if sitemap and sitemap not in matched:
-                matched.append(sitemap)
+            home = self.get_page("home")
+            matched = [home] if home else []
+            if not matched:
+                matched = list(
+                    {p["page_id"]: p for p in self.pages if p.get("page_type") == "nav"}.values()
+                )
+                sitemap = self.get_page("sitemap")
+                if sitemap and sitemap not in matched:
+                    matched.append(sitemap)
         if module == "auth":
             login_pages = [p for p in self.pages if p.get("page_type") == "login" or p.get("page_id") == "home"]
             matched = list({p["page_id"]: p for p in login_pages}.values())
@@ -96,22 +122,10 @@ class Contract:
                 "page_type": page.get("page_type"),
                 "test_priority": page.get("test_priority"),
                 "is_protected": page.get("is_protected"),
-                "elements": [
-                    {
-                        "element_id": e.get("element_id"),
-                        "role": e.get("role"),
-                        "label": e.get("label"),
-                        "description": e.get("description"),
-                        "category": e.get("category"),
-                        "target_path": e.get("target_path"),
-                        "href": e.get("href"),
-                        "selectors": e.get("selectors", {}),
-                    }
-                    for e in elements
-                ],
+                "elements": [_slim_element(e) for e in elements],
                 "forms": page.get("forms", []),
             })
-        return {
+        result: dict[str, Any] = {
             "contract_version": self.version,
             "application": self.raw.get("application", {}),
             "module": module,
@@ -121,6 +135,9 @@ class Contract:
             ],
             "pages": slim_pages,
         }
+        if module == "navigation" and self.home_navigation:
+            result["home_navigation"] = self.home_navigation
+        return result
 
     def trim_for_prompt(self, max_pages: int = 8, max_elements: int = 20) -> dict:
         slim = []
@@ -135,11 +152,14 @@ class Contract:
                 "elements": page.get("elements", [])[:max_elements],
                 "forms": page.get("forms", []),
             })
-        return {
+        result: dict[str, Any] = {
             "application": self.raw.get("application", {}),
             "route_index": self.route_index,
             "pages": slim,
         }
+        if self.home_navigation:
+            result["home_navigation"] = self.home_navigation
+        return result
 
 
 def load_contract(path: str | Path) -> Contract:

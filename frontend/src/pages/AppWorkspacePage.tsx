@@ -12,7 +12,9 @@ function basename(path: string) {
 }
 
 type WorkspaceNavState = { selectPlanId?: string };
-type BusyKind = "" | "plan" | "testcase" | "spec";
+type BusyKind = "" | "plan" | "testcase" | "spec" | "run";
+
+type RunResult = { passed: boolean; reportPath?: string };
 
 function PlanSelect({
   id,
@@ -53,6 +55,7 @@ export default function AppWorkspacePage() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState<BusyKind>("");
   const [statusMessage, setStatusMessage] = useState("");
+  const [runResult, setRunResult] = useState<RunResult | null>(null);
 
   const jobRunning = busy !== "";
 
@@ -153,14 +156,17 @@ export default function AppWorkspacePage() {
   async function runJob(kind: BusyKind, start: () => Promise<{ id: string }>, doneLabel: string) {
     setError("");
     setStatusMessage("");
+    if (kind === "run") {
+      setRunResult(null);
+    }
     setBusy(kind);
     try {
       const started = await start();
-      setStatusMessage("Job running…");
+      setStatusMessage(kind === "run" ? "Running Playwright test…" : "Job running…");
       const job = await pollJobUntilDone(started.id);
       if (job.status === "failed") {
         setError(job.error || "Job failed");
-        return;
+        return null;
       }
       setStatusMessage(doneLabel);
       const data = await loadWorkspace();
@@ -170,8 +176,20 @@ export default function AppWorkspacePage() {
       if (kind === "spec" && showSpecContent && selectedSpecPath) {
         await loadSpecContent(selectedSpecPath);
       }
+      if (kind === "run" && job.result?.passed !== undefined && job.result?.passed !== null) {
+        const result: RunResult = {
+          passed: job.result.passed,
+          reportPath: job.result.report_path ?? undefined,
+        };
+        setRunResult(result);
+        if (!result.passed) {
+          setError(`Test failed (exit code ${job.result.exit_code ?? "unknown"})`);
+        }
+      }
+      return job;
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed");
+      return null;
     } finally {
       setBusy("");
     }
@@ -201,6 +219,15 @@ export default function AppWorkspacePage() {
       "spec",
       () => api.generateSpec(slug, selectedPlanId),
       "Playwright spec generated.",
+    );
+  }
+
+  async function handlePlay() {
+    if (!slug || !selectedPlanId || !selectedSpecPath) return;
+    await runJob(
+      "run",
+      () => api.runSpec(slug, selectedPlanId, selectedSpecPath),
+      "Test run finished.",
     );
   }
 
@@ -346,8 +373,14 @@ export default function AppWorkspacePage() {
               >
                 {hasSpec ? "Regenerate" : "Generate"}
               </GenerateButton>
-              <button type="button" className="btn-play" disabled={!hasSpec || jobRunning}>
-                Play
+              <button
+                type="button"
+                className={`btn-play${busy === "run" ? " btn-loading" : ""}`}
+                disabled={!hasSpec || !selectedSpecPath || jobRunning}
+                onClick={handlePlay}
+              >
+                {busy === "run" && <span className="spinner" aria-hidden="true" />}
+                {busy === "run" ? "Running…" : "Play"}
               </button>
               <button
                 type="button"
@@ -363,6 +396,31 @@ export default function AppWorkspacePage() {
               </button>
             </div>
           </div>
+        )}
+        {selectedPlanId && testcase && hasSpec && (
+          <div style={{ marginTop: "0.75rem" }}>
+            <p className="note" style={{ marginBottom: 0 }}>
+              Play opens a visible Chromium window on your desktop. Run these two commands in your
+              terminal (from the <code>qa-automation</code> folder):
+            </p>
+            <pre className="cmd-snippet" style={{ marginTop: "0.5rem" }}>
+              {`xhost +local:docker
+docker compose -f docker-compose.yml -f docker-compose.headed.yml up -d --build`}
+            </pre>
+          </div>
+        )}
+        {runResult && (
+          <p className={`run-result ${runResult.passed ? "run-result-pass" : "run-result-fail"}`}>
+            {runResult.passed ? "Passed" : "Failed"}
+            {runResult.reportPath && slug && (
+              <>
+                {" · "}
+                <a href={api.downloadUrl(slug, runResult.reportPath)} target="_blank" rel="noreferrer">
+                  View report
+                </a>
+              </>
+            )}
+          </p>
         )}
         {showSpecContent && specPreview && (
           <div className="content-viewer spec-content-panel">

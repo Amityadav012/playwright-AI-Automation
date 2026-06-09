@@ -31,6 +31,7 @@ Rules:
 - EXACTLY ONE per-flow notes subsection for `{plan_id}`
 - Consolidate the entire user intent into this single flow (e.g. all nav links = one flow, not one per link)
 - Infer module (auth, navigation, or content) from the intent
+- For homepage navigation intents: use ONLY entries from contract `home_navigation` when present — do not list routes from `route_index` that are not in `home_navigation`
 - Priority P0
 - Reference real element_id and form field_id values from the contract
 - E2E only (no API or integration flows)
@@ -125,6 +126,7 @@ Rules:
 - flow_id MUST be `{flow_id}`
 - cases array MUST have EXACTLY ONE case object covering the full plan intent
 - For navigation intents: put ALL nav links in ONE case's nav_links array (do not split into multiple flows)
+- When contract includes `home_navigation`, nav_links MUST match those entries only (same element_id / target_path)
 - nav_links MUST be objects with label, route, and element_id — never plain strings
 - page_id in element_refs must be contract page_id (e.g. home), not PascalCase (not HomePage)
 - Use semantic assertions: url_matches_route, page_title_visible, form_field_visible, login_button_clickable, link_visible, page_loads

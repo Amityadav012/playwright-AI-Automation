@@ -432,3 +432,33 @@ button:disabled {
   color: #475569;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
+
+.run-result {
+  margin-top: 0.75rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.run-result-pass {
+  color: #047857;
+}
+
+.run-result-fail {
+  color: #b91c1c;
+}
+
+.btn-play.btn-loading .spinner {
+  border-color: rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+}
+
+.cmd-snippet {
+  margin: 0;
+  padding: 0.65rem 0.75rem;
+  background: #f8fafc;
+  border: 1px solid #dde3ea;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  overflow-x: auto;
+}
