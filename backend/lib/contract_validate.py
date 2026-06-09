@@ -52,6 +52,31 @@ def enforce_plan_module(flow: dict[str, Any], plan_meta: dict[str, Any]) -> dict
     return flow
 
 
+def _prefer_home_header_element(
+    ref: dict[str, Any],
+    contract: Contract,
+    element: dict,
+    eid: str,
+    page_id: str,
+) -> tuple[dict, str, str]:
+    """When the same label exists in the home header, prefer that for click steps."""
+    if ref.get("action", "click") != "click":
+        return element, eid, page_id
+    home = contract.get_page("home")
+    if not home:
+        return element, eid, page_id
+    on_home = _find_element_on_page(home, eid)
+    if on_home and on_home.get("region") == "header":
+        return on_home, eid, "home"
+    label = (element.get("label") or "").strip()
+    if not label:
+        return element, eid, page_id
+    for el in home.get("elements", []):
+        if el.get("region") == "header" and (el.get("label") or "").strip() == label:
+            return el, str(el["element_id"]), "home"
+    return element, eid, page_id
+
+
 def validate_element_ref(ref: dict[str, Any], contract: Contract) -> tuple[dict | None, str | None]:
     if not isinstance(ref, dict):
         return None, "invalid element_ref"
@@ -62,10 +87,11 @@ def validate_element_ref(ref: dict[str, Any], contract: Contract) -> tuple[dict 
     element = find_element(contract, str(eid), str(page_id))
     if not element:
         return None, f"unknown element_id {eid!r}"
+    element, eid, page_id = _prefer_home_header_element(ref, contract, element, str(eid), str(page_id))
     home = contract.get_page("home")
-    resolved_page = "home" if _find_element_on_page(home, str(eid)) else page_id
+    resolved_page = "home" if _find_element_on_page(home, eid) else page_id
     fixed = {
-        "element_id": str(eid),
+        "element_id": eid,
         "action": ref.get("action", "click"),
         "page_id": resolved_page,
     }
@@ -124,9 +150,11 @@ def case_has_nav_intent(
     flow: dict[str, Any],
     plan_meta: dict[str, Any],
 ) -> bool:
-    if case.get("nav_links"):
-        return True
-    if flow.get("module") == "navigation":
+    """True only when the plan/flow is a navigation test — not when the LLM copies home_navigation into a content case."""
+    module = flow.get("module") or plan_meta.get("module") or ""
+    if module in ("content", "auth"):
+        return False
+    if module == "navigation":
         return True
     intent = plan_meta.get("user_intent", "")
     return bool(NAV_INTENT_RE.search(intent))
@@ -210,13 +238,40 @@ def validate_flow(
             case, w = rewrite_nav_case(case, contract, full_replace=not multi)
             warnings.extend(w)
         else:
+            if case.get("nav_links"):
+                case = dict(case)
+                case.pop("nav_links", None)
+                warnings.append(
+                    f"{case.get('id')}: removed nav_links from non-navigation flow (module={flow.get('module')!r})"
+                )
             valid_refs: list[dict[str, Any]] = []
             for ref in case.get("element_refs", []):
                 fixed, err = validate_element_ref(ref, contract)
                 if fixed:
+                    action = ref.get("action", "click") if isinstance(ref, dict) else "click"
+                    fixed["action"] = action
+                    if isinstance(ref, dict) and ref.get("value") is not None:
+                        fixed["value"] = ref["value"]
                     valid_refs.append(fixed)
                 elif err:
                     warnings.append(f"{case.get('id')}: {err}")
+            if flow.get("module") == "content" and contract.home_navigation:
+                home_nav_ids = {
+                    e["element_id"] for e in contract.home_navigation if e.get("element_id")
+                }
+                non_nav = [r for r in valid_refs if r["element_id"] not in home_nav_ids]
+                if len(non_nav) < len(valid_refs):
+                    dropped = len(valid_refs) - len(non_nav)
+                    warnings.append(
+                        f"{case.get('id')}: dropped {dropped} "
+                        "home_navigation element_refs from content flow"
+                    )
+                    valid_refs = non_nav
+                if not valid_refs:
+                    warnings.append(
+                        f"{case.get('id')}: no content element_refs after validation — "
+                        "regenerate testcase; LLM must reference plan steps, not header nav"
+                    )
             case["element_refs"] = valid_refs
 
         cases_out.append(case)

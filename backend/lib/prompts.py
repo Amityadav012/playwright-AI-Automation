@@ -110,11 +110,9 @@ Return ONLY JSON (no markdown). The root object IS the flow (do not wrap in "flo
       "preconditions": ["..."],
       "steps": ["..."],
       "assertions": ["page_title_visible"],
-      "nav_links": [
-        {{ "label": "Home", "route": "/", "element_id": "home_2" }}
-      ],
       "element_refs": [
-        {{ "element_id": "...", "action": "click", "page_id": "home" }}
+        {{ "element_id": "...", "action": "click", "page_id": "home" }},
+        {{ "element_id": "...", "action": "fill", "page_id": "assets_section", "value": "search term" }}
       ],
       "coverage_note": "why this case exists"
     }}
@@ -128,12 +126,14 @@ Rules:
 - Guidance (not hard rules): split by distinct user journeys, isolated nav links, or auth vs content; keep tightly coupled smoke in one case
 - Case ids: `{flow_id}-H1`, `{flow_id}-H2`, … sequentially
 - FORBIDDEN: inventing element_id, route, or page_id not in the contract slice
-- When contract includes `home_navigation`, nav_links MUST use only those entries (same element_id / target_path)
+- nav_links: ONLY when module is "navigation". For content or auth flows omit nav_links entirely (do not copy home_navigation)
+- When module is "navigation" and contract includes `home_navigation`, nav_links MUST use only those entries
 - nav_links MUST be objects with label, route, and element_id — never plain strings
+- element_refs MUST match the plan steps (e.g. Assets button click, search input fill) — not unrelated header links
 - element_refs[].page_id must be contract page_id (e.g. home), not PascalCase (not HomePage)
 - Use semantic assertions: url_matches_route, page_title_visible, form_field_visible, login_button_clickable, link_visible, page_loads
 - element_refs must use real element_id values from contract
-- ui_pages use PascalCase Page names (e.g. home -> HomePage)
+- ui_pages use PascalCase Page names (e.g. home -> HomePage); include HomePage when the flow starts from the home page
 """
 
 
@@ -154,12 +154,13 @@ Case:
 Contract slice (ONLY allowed selectors and element_ids):
 {json.dumps(contract_slice, indent=2)}
 
-POM classes available: {", ".join(pom_names)}
+Contract element_ids (for reference): use selectors.playwright from the contract slice below — NOT invented names
 
 Rules:
-- Output ONLY the inside of test('{case_id}: ...', async ({{ page }}) => {{ ... }})
-- Use selectors.playwright from contract only — do NOT invent selectors
-- Use POM instances where possible
+- Output ONLY statements inside the test body — do NOT include test(...) or closing }}); lines
+- Use ONLY selectors.playwright from the contract — do NOT invent selectors or method names
+- FORBIDDEN: semantic POM helpers (e.g. clickAssetsButton, fillSearchInput, submitSearch)
+- Use page.getByRole / page.locator patterns exactly as in contract selectors.playwright
 - Do NOT use page.goto inside the test — assume beforeEach navigates to home
 - Include url/hash assertions from contract assert metadata when clicking nav links
 - Output ONLY code, no markdown fences

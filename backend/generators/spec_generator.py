@@ -129,6 +129,36 @@ def _escape_ts_string(value: str) -> str:
     return value
 
 
+def _test_open_line(case_id: str, title: str) -> str:
+    safe_title = _escape_ts_string(title)
+    return f"  test('{case_id}: {safe_title}', async ({{ page }}) => {{"
+
+
+def _normalize_llm_case_body(body: str) -> str:
+    """Strip a full test() wrapper when the LLM ignores the inside-only instruction."""
+    body = body.replace("```typescript", "").replace("```ts", "").replace("```", "").strip()
+    if not body:
+        return body
+    if body.lstrip().startswith("test("):
+        arrow = re.search(r"async\s*\(\s*\{[^}]*\}\s*\)\s*=>\s*\{", body)
+        if arrow:
+            inner = body[arrow.end():].strip()
+            if inner.endswith("});"):
+                inner = inner[:-3].rstrip()
+            elif inner.endswith("})"):
+                inner = inner[:-2].rstrip()
+            return inner
+    lines: list[str] = []
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("test("):
+            continue
+        if stripped in ("});", "})"):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
 def _normalize_playwright_selector(pw: str, *, page_var: str = "this.page") -> str:
     """Rewrite contract selectors so embedded name strings are valid TS literals."""
     pw = pw.strip().replace("page.", f"{page_var}.")
@@ -213,14 +243,23 @@ def generate_pom(page: dict, class_name: str) -> str:
 
 
 def _normalize_page_id(page_id: str) -> str:
+    """Map POM names or YAML page_id to contract page_id (snake_case)."""
     if not page_id:
         return ""
     if page_id.endswith("Page"):
         stem = page_id[:-4]
         if stem.lower() == "home":
             return "home"
-        return re.sub(r"(?<!^)(?=[A-Z])", "-", stem).lower().replace("_", "-")
-    return page_id.lower().replace("_", "-")
+        return re.sub(r"(?<!^)(?=[A-Z])", "_", stem).lower()
+    return page_id.lower().replace("-", "_")
+
+
+def _get_contract_page(contract: Contract, page_id: str) -> dict | None:
+    pid = _normalize_page_id(page_id)
+    page = contract.get_page(pid)
+    if page:
+        return page
+    return contract.get_page(pid.replace("_", "-"))
 
 
 def _find_element(
@@ -233,7 +272,7 @@ def _find_element(
     pid = _normalize_page_id(page_id) if page_id else None
     pages = contract.pages
     if pid:
-        page = contract.get_page(pid)
+        page = _get_contract_page(contract, page_id or "")
         pages = [page] if page else []
 
     for page in pages or contract.pages:
@@ -394,18 +433,41 @@ def _build_nav_links_constant(flow: dict, contract: Contract) -> str:
 
 
 def _resolve_start_path(flow: dict, contract: Contract, module: str) -> str:
+    home = contract.get_page("home")
+    home_path = (home.get("path", "/") or "/") if home else "/"
+
     ui_pages = flow.get("ui_pages") or []
-    if "HomePage" in ui_pages:
-        home = contract.get_page("home")
-        if home:
-            return home.get("path", "/") or "/"
+    if "HomePage" in ui_pages and home:
+        return home_path
+
+    for case in flow.get("cases", []):
+        preconds = " ".join(str(p) for p in (case.get("preconditions") or [])).lower()
+        if "home" in preconds and home:
+            return home_path
+        for ref in case.get("element_refs") or []:
+            if not isinstance(ref, dict):
+                continue
+            eid = ref.get("element_id")
+            if eid and home:
+                for el in home.get("elements", []):
+                    if el.get("element_id") == eid:
+                        return home_path
+                label = (ref.get("label") or "").strip()
+                if label:
+                    for el in home.get("elements", []):
+                        if (el.get("label") or "").strip() == label:
+                            return home_path
+
     for case in flow.get("cases", []):
         for ref in case.get("element_refs") or []:
             if not isinstance(ref, dict):
                 continue
-            page = contract.get_page(_normalize_page_id(ref.get("page_id", "")))
+            page = _get_contract_page(contract, str(ref.get("page_id", "")))
             if page:
                 return page.get("path", "/") or "/"
+
+    if home:
+        return home_path
     pages = contract.pages_for_module(module)
     if pages:
         return pages[0].get("path", "/") or "/"
@@ -430,7 +492,7 @@ def _resolve_click_element(
             if el.get("label", "").strip().lower() == label_fallback.strip().lower():
                 return el
     if eid:
-        page = contract.get_page(_normalize_page_id(ref.get("page_id", "")))
+        page = _get_contract_page(contract, str(ref.get("page_id", "")))
         if page:
             for el in page.get("elements", []):
                 if el.get("element_id") == eid:
@@ -443,8 +505,10 @@ def _structured_nav_links(case: dict) -> bool:
     return bool(raw) and all(isinstance(x, dict) for x in raw)
 
 
-def _is_nav_case(case: dict) -> bool:
-    """Nav-like case: structured nav_links (validated by contract), regardless of flow.module."""
+def _is_nav_case(case: dict, flow: dict | None = None) -> bool:
+    """Nav-like case: navigation module + structured nav_links from contract home_navigation."""
+    if flow and flow.get("module") not in (None, "navigation"):
+        return False
     if not _structured_nav_links(case):
         return False
     return any(
@@ -453,10 +517,10 @@ def _is_nav_case(case: dict) -> bool:
     )
 
 
-def _case_element_coverage(case: dict, contract: Contract) -> float:
+def _case_element_coverage(case: dict, contract: Contract, flow: dict | None = None) -> float:
     refs = [r for r in case.get("element_refs", []) if isinstance(r, dict)]
     if not refs:
-        return 1.0 if _is_nav_case(case) else 1.0
+        return 1.0 if _is_nav_case(case, flow) else 1.0
     home_page = contract.get_page("home")
     resolved = sum(
         1
@@ -476,20 +540,59 @@ def _allowed_selectors(contract_slice: dict) -> set[str]:
     return allowed
 
 
-def _sanitize_llm_body(body: str, allowed: set[str], contract: Contract, case: dict) -> str:
-    """Strip fences and reject selectors not in contract allowlist."""
-    body = body.replace("```typescript", "").replace("```ts", "").replace("```", "").strip()
-    if not allowed:
-        return body
+def _allowed_pom_methods(contract_slice: dict) -> set[str]:
+    """POM exposes element_id() locators only — no semantic helper names."""
+    methods: set[str] = {"expectLoaded"}
+    for page in contract_slice.get("pages", []):
+        for element in page.get("elements", []):
+            eid = element.get("element_id")
+            if eid:
+                methods.add(re.sub(r"[^a-zA-Z0-9_]", "_", str(eid)))
+        for form in page.get("forms", []):
+            for field in form.get("fields", []):
+                fid = field.get("field_id")
+                if fid:
+                    methods.add(re.sub(r"[^a-zA-Z0-9_]", "_", str(fid)) + "Field")
+    return methods
+
+
+_POM_METHOD_CALL_RE = re.compile(r"\.(\w+)\s*\(")
+
+
+def _ensure_locator_first(line: str) -> str:
+    """Add .first() before actions when LLM omits it (avoids strict-mode duplicate matches)."""
+    if ".first()" in line:
+        return line
+    for action in ("click", "fill", "press", "check", "uncheck", "type"):
+        line = line.replace(f").{action}(", f").first().{action}(")
+    return line
+
+
+def _sanitize_llm_body(
+    body: str,
+    allowed: set[str],
+    contract: Contract,
+    case: dict,
+    contract_slice: dict | None = None,
+) -> str:
+    """Strip fences, peel test() wrappers, reject invented POM methods and bad selectors."""
+    body = _normalize_llm_case_body(body)
+    pom_methods = _allowed_pom_methods(contract_slice or {})
     lines = body.splitlines()
     out: list[str] = []
     for line in lines:
         stripped = line.strip()
-        if "getByRole" in stripped or "locator(" in stripped:
+        if "Page(page)" in stripped or "Page(this.page)" in stripped:
+            calls = _POM_METHOD_CALL_RE.findall(stripped)
+            invented = [c for c in calls if c not in pom_methods and c != "constructor"]
+            if invented:
+                out.append(f"    // stripped invented POM method(s): {', '.join(invented)}")
+                continue
+        if allowed and ("getByRole" in stripped or "locator(" in stripped):
             if not any(sel.split(".first()")[0] in stripped for sel in allowed):
                 out.append(f"    // stripped non-contract selector: {stripped[:80]}")
                 continue
-        out.append(line)
+        out.append(_ensure_locator_first(line))
     return "\n".join(out)
 
 
@@ -548,6 +651,7 @@ def _emit_deterministic_case_body(
     case: dict,
     contract: Contract,
     start_path: str,
+    flow: dict | None = None,
 ) -> int:
     element_refs = [r for r in case.get("element_refs", [])[:30] if isinstance(r, dict)]
     nav_links = _collect_nav_links(case, contract)
@@ -555,7 +659,7 @@ def _emit_deterministic_case_body(
     home_page = contract.get_page("home")
     clicks_written = 0
 
-    if _is_nav_case(case) and nav_links:
+    if _is_nav_case(case, flow) and nav_links:
         _emit_nav_case_body(describe_lines, case, contract, start_path)
         return len([n for n in nav_links if n.get("route", "/") != "/"])
 
@@ -564,16 +668,18 @@ def _emit_deterministic_case_body(
         element = _resolve_click_element(
             contract, ref, home_page=home_page, label_fallback=label_fb
         )
-        if element:
-            click_expr = _click_expr_for_element(element)
-            if click_expr:
-                describe_lines.append(f"    await page.goto('{start_path or '/'}')")
-                describe_lines.append(f"    await {click_expr}")
-                url_line = _url_assert_for_element_click(element)
-                if url_line:
-                    describe_lines.append(f"    {url_line}")
-                describe_lines.append("    await expect(page).toHaveTitle(/.+/);")
-                clicks_written += 1
+        if not element:
+            continue
+        action_expr = _action_expr_for_ref(ref, element)
+        if not action_expr:
+            continue
+        describe_lines.append(f"    {action_expr}")
+        if ref.get("action", "click") == "click":
+            url_line = _url_assert_for_element_click(element)
+            if url_line:
+                describe_lines.append(f"    {url_line}")
+            describe_lines.append("    await expect(page).toHaveTitle(/.+/);")
+        clicks_written += 1
 
     if clicks_written == 0 and nav_links:
         describe_lines.append("    for (const link of NAV_LINKS) {")
@@ -731,22 +837,50 @@ def _url_assert_for_nav(route: str, el: dict | None, assert_meta: dict | None = 
     )
 
 
-def _click_expr_for_element(el: dict) -> str | None:
+def _locator_expr_for_element(el: dict, *, page_var: str = "page") -> str | None:
     xpath = el.get("selectors", {}).get("xpath", "")
     pw = el.get("selectors", {}).get("playwright", "")
     if pw:
-        return f"{_normalize_playwright_selector(pw, page_var='page')}.first().click()"
+        return _normalize_playwright_selector(pw, page_var=page_var)
     if xpath:
-        return f"page.locator('xpath={_escape_ts_string(xpath)}').first().click()"
+        return f"{page_var}.locator('xpath={_escape_ts_string(xpath)}')"
     label = el.get("label", "")
     role = el.get("role", "link")
     pw_role = {"link": "link", "button": "button", "input": "textbox"}.get(role, "button")
     if label:
         return (
-            f"page.getByRole('{pw_role}', "
-            f"{{ name: '{_escape_ts_string(label)}', exact: true }}).first().click()"
+            f"{page_var}.getByRole('{pw_role}', "
+            f"{{ name: '{_escape_ts_string(label)}', exact: true }})"
         )
     return None
+
+
+def _action_expr_for_ref(ref: dict, element: dict) -> str | None:
+    """Emit Playwright action from contract selector + testcase ref action/value."""
+    locator = _locator_expr_for_element(element)
+    if not locator:
+        return None
+    target = f"{locator}.first()"
+    action = ref.get("action", "click")
+    if action == "click":
+        return f"await {target}.click();"
+    if action == "fill":
+        value = _escape_ts_string(str(ref.get("value", "")))
+        return f"await {target}.fill('{value}');"
+    if action == "press":
+        key = _escape_ts_string(str(ref.get("value", "Enter")))
+        return f"await {target}.press('{key}');"
+    if action == "type":
+        value = _escape_ts_string(str(ref.get("value", "")))
+        return f"await {target}.pressSequentially('{value}');"
+    return f"await {target}.click();"
+
+
+def _click_expr_for_element(el: dict) -> str | None:
+    expr = _action_expr_for_ref({"action": "click"}, el)
+    if not expr:
+        return None
+    return expr.removeprefix("await ").rstrip(";")
 
 
 def generate_spec(
@@ -818,27 +952,29 @@ def generate_spec(
         for case in flow.get("cases", []):
             case_id = case.get("id", "case")
             title = case.get("title", case_id)
-            describe_lines.append(f"  test('{case_id}: {title}', async ({{ page }}) => {{")
+            describe_lines.append(_test_open_line(case_id, title))
 
-            coverage = _case_element_coverage(case, contract)
-            use_llm_for_case = use_llm_spec or coverage < COVERAGE_LLM_THRESHOLD
             refs_count = len([r for r in case.get("element_refs", []) if isinstance(r, dict)])
+            slice_data = contract.slice_for_case(case)
 
-            if use_llm_for_case and refs_count > 0 and not _is_nav_case(case):
-                slice_data = contract.slice_for_case(case)
+            if use_llm_spec and refs_count > 0 and not _is_nav_case(case, flow):
                 body = llm.complete(
                     spec_case_prompt(case, slice_data, pom_names, flow_id=flow_id),
                     temperature=0.2,
                     max_tokens=2000,
                 )
-                body = _sanitize_llm_body(body, _allowed_selectors(slice_data), contract, case)
-                if body:
+                body = _sanitize_llm_body(
+                    body, _allowed_selectors(slice_data), contract, case, slice_data
+                )
+                if body and not all(
+                    ln.strip().startswith("//") for ln in body.splitlines() if ln.strip()
+                ):
                     for line in body.splitlines():
-                        describe_lines.append(f"  {line}" if line.startswith("test(") else f"    {line}")
+                        describe_lines.append(f"    {line}" if line.strip() else "")
                 else:
-                    _emit_deterministic_case_body(describe_lines, case, contract, start_path)
+                    _emit_deterministic_case_body(describe_lines, case, contract, start_path, flow)
             else:
-                _emit_deterministic_case_body(describe_lines, case, contract, start_path)
+                _emit_deterministic_case_body(describe_lines, case, contract, start_path, flow)
 
             describe_lines.append("  })")
             describe_lines.append("")
