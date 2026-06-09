@@ -1,10 +1,8 @@
-# Website Scraper + Test Generator
+# QA Automation Pipeline
 
-Two functions that work together:
-1. `scraper.py` — crawls a website and outputs a `site_map.json`
-2. `test_generator.py` — reads that JSON and generates Playwright TypeScript test stubs
+App-agnostic tooling: scrape a website → UI contract JSON → test plans → YAML testcases → Playwright E2E specs.
 
----
+Aligned with the [fpa-qa-test](../fpa-qa-test/) architecture (testplan → testcases → scripts), but driven by an auto-generated UI contract.
 
 ## Setup
 
@@ -12,128 +10,113 @@ Two functions that work together:
 pip install -r requirements.txt
 playwright install chromium
 cp .env.example .env
-# Fill in your OPENAI_API_KEY in .env
+# Set OPENAI_API_KEY in .env
 ```
 
----
-
-## Step 1 — Scrape the website
-
-### Public site only
-```bash
-python scraper.py https://yourapp.com
-```
-
-### Site with login (for protected pages)
-```bash
-python scraper.py https://yourapp.com \
-  --login-url https://yourapp.com/login \
-  --username admin@yourapp.com \
-  --password yourpassword \
-  --max-pages 30
-```
-
-Output: `site_map.json`
-
----
-
-## Step 2 — Generate tests
+## Full pipeline
 
 ```bash
-python test_generator.py --sitemap site_map.json --output generated_tests
+# Option A: contract already exists
+python pipeline.py \
+  --contract bihar-contract.json \
+  --app bihar-krishi \
+  --steps plan,yaml,spec
+
+# Option B: scrape first, then generate
+python pipeline.py \
+  --url https://staging.biharkrishi.in \
+  --contract bihar-contract.json \
+  --app bihar-krishi \
+  --max-pages 20 \
+  --steps all
 ```
 
-Only high priority pages:
+### Pipeline steps
+
+| Step | Command | Output |
+|------|---------|--------|
+| `scrape` | `scraper.py` | `{app}-contract.json` |
+| `plan` | `generators/test_plan_generator.py` | `output/{app}/tests/testplan/*.md` |
+| `yaml` | `generators/testcase_generator.py` | `output/{app}/tests/testcases/{module}/*.yaml` |
+| `spec` | `generators/spec_generator.py` | `output/{app}/tests/scripts/e2e/`, `pages/` |
+
+**Human review gates:** Edit test plans before `yaml`. Review YAML before `spec`. Review generated specs before commit.
+
+### Run generated tests
+
 ```bash
-python test_generator.py --priority high
+cd output/bihar-krishi
+cp .env.qa.example .env.qa
+# Set QA_UI_BASE_URL=https://staging.biharkrishi.in
+npm install
+npx playwright install chromium
+npm run test:smoke
 ```
 
-Output: `generated_tests/*.spec.ts` + `generated_tests/_index.json`
+## Individual generators
 
----
+```bash
+# 1. Scrape → contract
+python scraper.py https://yourapp.com --output myapp-contract.json --max-pages 20
 
-## Use as a Python module
+# 2. Test plans
+python -m generators.test_plan_generator --contract myapp-contract.json --app my-app
 
-```python
-from scraper import scrape_website
-from test_generator import generate_all_tests
+# 3. YAML testcases
+python -m generators.testcase_generator --contract myapp-contract.json --app my-app
 
-# Step 1: scrape
-scrape_website(
-    base_url="https://yourapp.com",
-    output_path="site_map.json",
-    login_url="https://yourapp.com/login",
-    username="admin@yourapp.com",
-    password="secret",
-    max_pages=30,
-)
-
-# Step 2: generate tests
-generate_all_tests(
-    sitemap_path="site_map.json",
-    output_dir="generated_tests",
-    priority_filter="all",  # or "high" / "medium" / "low"
-)
+# 4. Playwright specs + POMs
+python -m generators.spec_generator --contract myapp-contract.json --app my-app
+python -m generators.spec_generator --contract myapp-contract.json --app my-app --flow AUTH-01
 ```
 
----
+## Output layout
 
-## Contract JSON structure (`contract_version: 1.0.0`)
+```
+output/{app}/
+  manifest.json
+  playwright.config.ts
+  package.json
+  tests/
+    testplan/           # Markdown plans (human-editable)
+    testcases/          # YAML DSL (review before codegen)
+    scripts/
+      e2e/{module}/     # Generated *.e2e.spec.ts
+      pages/            # Generated *.page.ts
+      helpers/          # Scaffolded auth/env stubs
+```
+
+## Contract JSON (`contract_version: 1.0.0`)
+
+Produced by [scraper.py](scraper.py). See [QA-Implementation-Guide.docx](QA-Implementation-Guide.docx) for the full AI-assisted QA workflow.
 
 ```json
 {
   "contract_version": "1.0.0",
   "application": { "name": "My App", "base_url": "https://yourapp.com" },
-  "extraction_metadata": { "tool": "qa-automation/scraper.py", "scraped_at": "...", "total_pages": 12 },
-  "route_index": [
-    { "page_id": "login", "path": "/login", "url": "https://yourapp.com/login", "test_priority": "high" }
-  ],
-  "pages": [
-    {
-      "page_id": "login",
-      "path": "/login",
-      "url": "https://yourapp.com/login",
-      "title": "Login",
-      "description": "User authentication page",
-      "page_type": "login",
-      "test_priority": "high",
-      "elements": [
-        {
-          "element_id": "login_button",
-          "role": "button",
-          "label": "Login",
-          "description": "Submits mobile number to start authentication",
-          "selectors": {
-            "playwright": "page.getByRole('button', { name: 'Login' })",
-            "xpath": "//button[@id='submitButton']"
-          }
-        }
-      ],
-      "forms": [
-        {
-          "form_id": "mobile_login",
-          "description": "Farmer login form using mobile number",
-          "fields": [
-            {
-              "field_id": "mobile",
-              "label": "Mobile number",
-              "description": "Registered DBT or DFS mobile number",
-              "selectors": { "playwright": "page.locator('#user_mobile')", "xpath": "//input[@id='user_mobile']" }
-            }
-          ]
-        }
-      ]
-    }
-  ]
+  "route_index": [{ "page_id": "home", "path": "/", "test_priority": "high" }],
+  "pages": [{
+    "page_id": "home",
+    "elements": [{ "element_id": "login_btn", "label": "Login", "description": "...", "selectors": { "playwright": "..." } }],
+    "forms": [{ "form_id": "login", "fields": [{ "field_id": "mobile", "description": "..." }] }]
+  }]
 }
 ```
 
----
+## Legacy
 
-## How the LLM is used
+[test_generator.py](test_generator.py) is **deprecated** — it generates page-level stubs directly from the contract. Use `pipeline.py` + `generators/spec_generator.py` for flow-based E2E tests.
 
-| Where | What it does |
-|---|---|
-| `decide_which_urls_to_crawl` | Picks important pages, skips duplicates/noise |
-| `analyze_page` | Classifies page type, assigns test priority, detects auth |
-| `generate_tests_for_page` | Writes Playwright TypeScript test stubs using real XPaths |
+## Project structure
+
+```
+qa-automation/
+  scraper.py              # Stage 0: crawl → contract JSON
+  pipeline.py             # Orchestrator
+  lib/                    # contract, llm, prompts, overlap, assertions
+  generators/
+    test_plan_generator.py
+    testcase_generator.py
+    spec_generator.py
+  output/                 # Generated per-app artifacts (gitignored)
+```

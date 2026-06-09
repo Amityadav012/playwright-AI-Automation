@@ -1,8 +1,11 @@
 """
-Test Generator
---------------
-Consumes the UI action contract JSON produced by scraper.py
-and uses OpenAI to generate Playwright TypeScript test stubs.
+Test Generator (DEPRECATED)
+---------------------------
+Legacy page-level stub generator. Prefer the flow-based pipeline:
+
+  python pipeline.py --contract <contract.json> --app <slug> --steps plan,yaml,spec
+
+See generators/spec_generator.py and README.md.
 """
 
 import os
