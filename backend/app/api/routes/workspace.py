@@ -13,7 +13,12 @@ from app.models.schemas import (
 from app.services import job_runner
 from lib.contract import load_contract
 from lib.paths import ensure_app_dirs
-from lib.workspace import ensure_workspace, resolve_contract_path, sync_plans_from_disk
+from lib.workspace import (
+    ensure_workspace,
+    resolve_contract_path,
+    sync_contract_artifact,
+    sync_plans_from_disk,
+)
 
 router = APIRouter(prefix="/api/apps", tags=["workspace"])
 
@@ -41,6 +46,7 @@ def _contract_info(app_slug: str) -> ContractInfoResponse:
 @router.get("/{slug}/workspace", response_model=WorkspaceResponse)
 def get_workspace(slug: str) -> WorkspaceResponse:
     ensure_app_dirs(slug)
+    sync_contract_artifact(slug)
     ws = sync_plans_from_disk(slug)
     info = _contract_info(slug)
     return WorkspaceResponse(

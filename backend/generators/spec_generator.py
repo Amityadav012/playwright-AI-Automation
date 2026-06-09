@@ -16,15 +16,17 @@ from typing import Any
 import yaml
 from dotenv import load_dotenv
 
-from lib.assertions import map_assertions, map_assertions_for_nav_loop
+from lib.assertions import assert_line_from_contract, map_assertions, map_assertions_for_nav_loop
 from lib.contract import Contract, load_contract, page_id_to_pom_name
 from lib.llm import LLMClient
 from lib.artifacts import spec_path as canonical_spec_path
 from lib.artifacts import spec_rel
 from lib.artifacts import testcase_path as canonical_testcase_path
 from lib.paths import ensure_app_dirs
-from lib.prompts import spec_body_prompt
+from lib.prompts import spec_body_prompt, spec_case_prompt
 from lib.workspace import register_spec
+
+COVERAGE_LLM_THRESHOLD = 0.5
 
 load_dotenv()
 
@@ -441,6 +443,156 @@ def _structured_nav_links(case: dict) -> bool:
     return bool(raw) and all(isinstance(x, dict) for x in raw)
 
 
+def _is_nav_case(case: dict) -> bool:
+    """Nav-like case: structured nav_links (validated by contract), regardless of flow.module."""
+    if not _structured_nav_links(case):
+        return False
+    return any(
+        isinstance(link, dict) and (link.get("element_id") or link.get("assert"))
+        for link in case.get("nav_links", [])
+    )
+
+
+def _case_element_coverage(case: dict, contract: Contract) -> float:
+    refs = [r for r in case.get("element_refs", []) if isinstance(r, dict)]
+    if not refs:
+        return 1.0 if _is_nav_case(case) else 1.0
+    home_page = contract.get_page("home")
+    resolved = sum(
+        1
+        for ref in refs
+        if _resolve_click_element(contract, ref, home_page=home_page)
+    )
+    return resolved / len(refs)
+
+
+def _allowed_selectors(contract_slice: dict) -> set[str]:
+    allowed: set[str] = set()
+    for page in contract_slice.get("pages", []):
+        for element in page.get("elements", []):
+            pw = element.get("selectors", {}).get("playwright", "")
+            if pw:
+                allowed.add(pw.strip())
+    return allowed
+
+
+def _sanitize_llm_body(body: str, allowed: set[str], contract: Contract, case: dict) -> str:
+    """Strip fences and reject selectors not in contract allowlist."""
+    body = body.replace("```typescript", "").replace("```ts", "").replace("```", "").strip()
+    if not allowed:
+        return body
+    lines = body.splitlines()
+    out: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if "getByRole" in stripped or "locator(" in stripped:
+            if not any(sel.split(".first()")[0] in stripped for sel in allowed):
+                out.append(f"    // stripped non-contract selector: {stripped[:80]}")
+                continue
+        out.append(line)
+    return "\n".join(out)
+
+
+def _url_assert_for_element_click(element: dict, norm: dict | None = None) -> str | None:
+    assert_meta = None
+    route = ""
+    if norm:
+        assert_meta = norm.get("assert") if isinstance(norm.get("assert"), dict) else None
+        route = norm.get("route", "") or ""
+    if not assert_meta:
+        tp = element.get("target_path") or ""
+        if tp.startswith("/#"):
+            assert_meta = {"kind": "hash", "value": tp[1:]}
+            route = tp
+        elif tp and tp != "/":
+            route = tp
+    line = assert_line_from_contract(assert_meta or {}, route)
+    if line:
+        return line
+    if route and route != "/":
+        return _url_assert_for_nav(route, element, assert_meta)
+    return None
+
+
+def _emit_nav_case_body(
+    describe_lines: list[str],
+    case: dict,
+    contract: Contract,
+    start_path: str,
+) -> None:
+    nav_links = _collect_nav_links(case, contract)
+    home_page = contract.get_page("home")
+    for norm in nav_links:
+        route = norm.get("route", "/")
+        if route == "/":
+            continue
+        element = _resolve_home_nav_element(contract, home_page, norm)
+        if not element:
+            log.warning(
+                "Skipping nav link %s (%s): not on home page",
+                norm.get("label"),
+                norm.get("element_id"),
+            )
+            continue
+        click_expr = _click_expr_for_element(element) or _click_expr_for_nav_element(element, route)
+        if not click_expr:
+            continue
+        describe_lines.append(f"    await page.goto('{start_path or '/'}')")
+        describe_lines.append(f"    await {click_expr}")
+        describe_lines.append(f"    {_url_assert_for_nav(route, element, norm.get('assert'))}")
+        describe_lines.append("    await expect(page).toHaveTitle(/.+/);")
+
+
+def _emit_deterministic_case_body(
+    describe_lines: list[str],
+    case: dict,
+    contract: Contract,
+    start_path: str,
+) -> int:
+    element_refs = [r for r in case.get("element_refs", [])[:30] if isinstance(r, dict)]
+    nav_links = _collect_nav_links(case, contract)
+    raw_nav_labels = [x for x in case.get("nav_links") or [] if isinstance(x, str)]
+    home_page = contract.get_page("home")
+    clicks_written = 0
+
+    if _is_nav_case(case) and nav_links:
+        _emit_nav_case_body(describe_lines, case, contract, start_path)
+        return len([n for n in nav_links if n.get("route", "/") != "/"])
+
+    for i, ref in enumerate(element_refs):
+        label_fb = raw_nav_labels[i] if i < len(raw_nav_labels) else None
+        element = _resolve_click_element(
+            contract, ref, home_page=home_page, label_fallback=label_fb
+        )
+        if element:
+            click_expr = _click_expr_for_element(element)
+            if click_expr:
+                describe_lines.append(f"    await page.goto('{start_path or '/'}')")
+                describe_lines.append(f"    await {click_expr}")
+                url_line = _url_assert_for_element_click(element)
+                if url_line:
+                    describe_lines.append(f"    {url_line}")
+                describe_lines.append("    await expect(page).toHaveTitle(/.+/);")
+                clicks_written += 1
+
+    if clicks_written == 0 and nav_links:
+        describe_lines.append("    for (const link of NAV_LINKS) {")
+        describe_lines.append(f"      await page.goto('{start_path or '/'}')")
+        describe_lines.append(
+            "      await page.getByRole('link', { name: link.label, exact: true }).first().click();"
+        )
+        for line in map_assertions_for_nav_loop(
+            case.get("assertions", ["page_loads"])
+        ):
+            describe_lines.append(f"      {line}")
+        describe_lines.append("    }")
+    elif clicks_written == 0:
+        for line in map_assertions(case.get("assertions", ["page_loads"])):
+            describe_lines.append(f"    {line}")
+
+    return clicks_written
+
+
 def _resolve_home_nav_element(
     contract: Contract,
     home_page: dict | None,
@@ -603,6 +755,7 @@ def generate_spec(
     yaml_path: Path,
     llm: LLMClient | None = None,
     use_llm_body: bool = False,
+    use_llm_spec: bool = False,
 ) -> str:
     llm = llm or LLMClient()
     module = flow.get("module", "general")
@@ -661,74 +814,31 @@ def generate_spec(
         for line in body.splitlines():
             describe_lines.append(f"  {line}")
     else:
+        flow_id = flow.get("flow_id", "FLOW-01")
         for case in flow.get("cases", []):
             case_id = case.get("id", "case")
             title = case.get("title", case_id)
             describe_lines.append(f"  test('{case_id}: {title}', async ({{ page }}) => {{")
 
-            element_refs = [
-                r for r in case.get("element_refs", [])[:30] if isinstance(r, dict)
-            ]
-            nav_links = _collect_nav_links(case, contract)
-            raw_nav_labels = [x for x in case.get("nav_links") or [] if isinstance(x, str)]
-            home_page = contract.get_page("home")
-            clicks_written = 0
+            coverage = _case_element_coverage(case, contract)
+            use_llm_for_case = use_llm_spec or coverage < COVERAGE_LLM_THRESHOLD
+            refs_count = len([r for r in case.get("element_refs", []) if isinstance(r, dict)])
 
-            if module == "navigation" and _structured_nav_links(case) and nav_links:
-                for norm in nav_links:
-                    route = norm.get("route", "/")
-                    if route == "/":
-                        continue
-                    element = _resolve_home_nav_element(contract, home_page, norm)
-                    if not element:
-                        log.warning(
-                            "Skipping nav link %s (%s): not on home page",
-                            norm.get("label"),
-                            norm.get("element_id"),
-                        )
-                        continue
-                    click_expr = _click_expr_for_element(element)
-                    if not click_expr:
-                        click_expr = _click_expr_for_nav_element(element, route)
-                    if not click_expr:
-                        continue
-                    describe_lines.append(f"    await page.goto('{start_path or '/'}')")
-                    describe_lines.append(f"    await {click_expr}")
-                    describe_lines.append(
-                        f"    {_url_assert_for_nav(route, element, norm.get('assert'))}"
-                    )
-                    describe_lines.append("    await expect(page).toHaveTitle(/.+/);")
-                describe_lines.append("  })")
-                describe_lines.append("")
-                continue
-
-            for i, ref in enumerate(element_refs):
-                label_fb = raw_nav_labels[i] if i < len(raw_nav_labels) else None
-                element = _resolve_click_element(
-                    contract, ref, home_page=home_page, label_fallback=label_fb
+            if use_llm_for_case and refs_count > 0 and not _is_nav_case(case):
+                slice_data = contract.slice_for_case(case)
+                body = llm.complete(
+                    spec_case_prompt(case, slice_data, pom_names, flow_id=flow_id),
+                    temperature=0.2,
+                    max_tokens=2000,
                 )
-                if element:
-                    click_expr = _click_expr_for_element(element)
-                    if click_expr:
-                        describe_lines.append(f"    await page.goto('{start_path or '/'}')")
-                        describe_lines.append(f"    await {click_expr}")
-                        describe_lines.append("    await expect(page).toHaveTitle(/.+/);")
-                        clicks_written += 1
-
-            if clicks_written == 0 and nav_links:
-                describe_lines.append("    for (const link of NAV_LINKS) {")
-                describe_lines.append(f"      await page.goto('{start_path or '/'}')")
-                describe_lines.append(
-                    "      await page.getByRole('link', { name: link.label, exact: true }).first().click();"
-                )
-                for line in map_assertions_for_nav_loop(
-                    case.get("assertions", ["page_loads"])
-                ):
-                    describe_lines.append(f"      {line}")
-                describe_lines.append("    }")
-            elif clicks_written == 0:
-                for line in map_assertions(case.get("assertions", ["page_loads"])):
-                    describe_lines.append(f"    {line}")
+                body = _sanitize_llm_body(body, _allowed_selectors(slice_data), contract, case)
+                if body:
+                    for line in body.splitlines():
+                        describe_lines.append(f"  {line}" if line.startswith("test(") else f"    {line}")
+                else:
+                    _emit_deterministic_case_body(describe_lines, case, contract, start_path)
+            else:
+                _emit_deterministic_case_body(describe_lines, case, contract, start_path)
 
             describe_lines.append("  })")
             describe_lines.append("")
@@ -743,6 +853,7 @@ def generate_spec_for_plan(
     app_slug: str,
     plan_id: str,
     llm: LLMClient | None = None,
+    use_llm_spec: bool = False,
 ) -> list[Path]:
     """1 plan → 1 case.yaml → 1 case.e2e.spec.ts."""
     root = ensure_app_dirs(app_slug)
@@ -787,7 +898,9 @@ def generate_spec_for_plan(
             old.unlink()
             log.info("  Removed extra spec: %s", old.name)
 
-    spec_content = generate_spec(flow_data, contract, yaml_path, llm=llm)
+    spec_content = generate_spec(
+        flow_data, contract, yaml_path, llm=llm, use_llm_spec=use_llm_spec
+    )
     out_spec.write_text(spec_content, encoding="utf-8")
     written.append(out_spec)
     register_spec(app_slug, plan_id, plan_id, spec_rel(plan_id))
@@ -802,8 +915,11 @@ def generate_specs_for_plan_flow(
     plan_id: str,
     flow_id: str | None = None,
     llm: LLMClient | None = None,
+    use_llm_spec: bool = False,
 ) -> list[Path]:
-    return generate_spec_for_plan(contract, app_slug, plan_id, llm=llm)
+    return generate_spec_for_plan(
+        contract, app_slug, plan_id, llm=llm, use_llm_spec=use_llm_spec
+    )
 
 
 def generate_specs_for_flow(

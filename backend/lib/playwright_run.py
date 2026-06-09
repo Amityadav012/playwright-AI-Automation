@@ -134,7 +134,7 @@ def run_spec(
         "test",
         spec_rel_path,
         "--headed",
-        "--reporter=list",
+        "--reporter=html,list",
     ]
     exit_code = _run_command(cmd, app_root)
 

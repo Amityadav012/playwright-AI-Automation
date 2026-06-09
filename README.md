@@ -89,6 +89,8 @@ Extract Contract writes `contract_version: 1.1.0` JSON with:
 
 v1.0.0 contracts still load; navigation tests work best after re-extracting so `home_navigation` is populated.
 
+Canonical contract path: `data/contracts/{app}-contract.json`. A copy is synced to `data/output/{app}/{app}-contract.json` for the artifacts browser.
+
 ## Project structure
 
 ```

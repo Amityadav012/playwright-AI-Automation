@@ -29,6 +29,7 @@ class SpecJobRequest(BaseModel):
     app_slug: str
     plan_id: str
     flow_id: str | None = None
+    use_llm_spec: bool = False
 
 
 class RunSpecJobRequest(BaseModel):
@@ -99,6 +100,11 @@ class FileContentResponse(BaseModel):
     language: str
 
 
+class PlaywrightReportInfoResponse(BaseModel):
+    exists: bool
+    index_path: str | None = None
+
+
 class AppSummary(BaseModel):
     slug: str
     manifest: dict[str, Any] | None = None
@@ -126,6 +132,8 @@ class TestcaseEntry(BaseModel):
     flow_id: str
     path: str
     title: str = ""
+    case_count: str = ""
+    case_titles: str = ""
 
 
 class SpecEntry(BaseModel):

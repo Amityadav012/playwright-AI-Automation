@@ -163,7 +163,12 @@ def _run_spec(request: dict[str, Any]) -> dict[str, Any]:
 
     contract_path = _contract_path_for_app(app_slug)
     contract = load_contract(contract_path)
-    paths = generate_spec_for_plan(contract, app_slug, plan_id)
+    paths = generate_spec_for_plan(
+        contract,
+        app_slug,
+        plan_id,
+        use_llm_spec=bool(request.get("use_llm_spec")),
+    )
     spec_paths = [p for p in paths if p.name.endswith(".e2e.spec.ts")]
     rel = str(spec_paths[0].relative_to(app_output_dir(app_slug))) if spec_paths else None
     return {

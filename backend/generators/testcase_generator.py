@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 
 from lib.artifacts import testcase_path, testcase_rel
 from lib.contract import Contract, load_contract, page_id_to_pom_name
+from lib.contract_validate import validate_flow
 from lib.llm import LLMClient
 from lib.paths import ensure_app_dirs
 from lib.prompts import testcase_yaml_prompt
@@ -56,51 +57,7 @@ def _extract_flow_from_llm_result(result: Any) -> dict[str, Any] | None:
     return None
 
 
-def _expected_url_for_nav_entry(base_url: str, entry: dict) -> str:
-    target = entry.get("target_path") or "/"
-    base = base_url.rstrip("/")
-    if target.startswith("/#"):
-        return f"{base}{target[1:]}"
-    if target == "/":
-        return f"{base}/"
-    return f"{base}{target}"
-
-
-def _nav_links_from_home_navigation(contract: Contract) -> list[dict[str, Any]]:
-    links: list[dict[str, Any]] = []
-    for entry in contract.home_navigation:
-        element_id = entry.get("element_id")
-        if not element_id:
-            continue
-        target = entry.get("target_path") or "/"
-        links.append({
-            "element_id": element_id,
-            "action": "click",
-            "label": entry.get("label", ""),
-            "route": target,
-            "expected_url": _expected_url_for_nav_entry(contract.base_url, entry),
-            "assert": entry.get("assert"),
-            "raw_href": entry.get("raw_href"),
-        })
-    return links
-
-
-def _apply_home_navigation(flow: dict[str, Any], contract: Contract) -> dict[str, Any]:
-    if flow.get("module") != "navigation" or not contract.home_navigation:
-        return flow
-    nav_from_contract = _nav_links_from_home_navigation(contract)
-    if not nav_from_contract:
-        return flow
-    for case in flow.get("cases", []):
-        case["nav_links"] = nav_from_contract
-        case["element_refs"] = [
-            {"element_id": n["element_id"], "action": "click", "page_id": "home"}
-            for n in nav_from_contract
-        ]
-    return flow
-
-
-def _normalize_flow(flow: dict[str, Any], module: str) -> dict[str, Any]:
+def _normalize_flow(flow: dict[str, Any], module: str, plan_id: str = "") -> dict[str, Any]:
     flow = dict(flow)
     flow["module"] = flow.get("module") or module
     flow.setdefault("type", ["e2e"])
@@ -117,9 +74,12 @@ def _normalize_flow(flow: dict[str, Any], module: str) -> dict[str, Any]:
             normalized_pages.append(page_id_to_pom_name(name.replace("Page", "").lower()))
     flow["ui_pages"] = normalized_pages
 
+    flow_id = flow.get("flow_id") or plan_id or "FLOW-01"
     cases = []
-    for case in flow.get("cases", []):
+    for i, case in enumerate(flow.get("cases", [])):
         case = dict(case)
+        if not case.get("id"):
+            case["id"] = f"{flow_id}-H{i + 1}"
         case.setdefault("test_type", ["e2e"])
         case.setdefault("type", "happy_path")
         case.setdefault("tags", flow.get("tags", ["regression"]))
@@ -159,9 +119,11 @@ def generate_testcases_for_plan(
             f"LLM returned no flow for plan {plan_path}. Response preview: {preview}"
         )
 
-    flow = _normalize_flow(flow, module)
-    flow = _apply_home_navigation(flow, contract)
+    flow = _normalize_flow(flow, module, plan_id=plan_id)
     flow["flow_id"] = plan_id
+    flow, warnings = validate_flow(flow, contract, meta)
+    for warning in warnings:
+        log.warning("  Validator: %s", warning)
 
     out_dir = root / "tests" / "testcases" / plan_id
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -176,15 +138,20 @@ def generate_testcases_for_plan(
         yaml.dump(flow, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
     log.info("  Written: %s", out_path)
 
-    title = ""
     cases = flow.get("cases") or []
-    if cases:
-        title = cases[0].get("title", "")
+    title = cases[0].get("title", "") if cases else ""
+    case_titles = [c.get("title", "") for c in cases if c.get("title")]
 
     register_testcases(
         app_slug,
         plan_id,
-        [{"flow_id": plan_id, "path": testcase_rel(plan_id), "title": title}],
+        [{
+            "flow_id": plan_id,
+            "path": testcase_rel(plan_id),
+            "title": title,
+            "case_count": str(len(cases)),
+            "case_titles": " | ".join(case_titles[:5]),
+        }],
     )
 
     return [out_path]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +27,39 @@ def workspace_path(app_slug: str) -> Path:
 def resolve_contract_path(app_slug: str, filename: str | None = None) -> Path:
     name = filename or f"{app_slug}-contract.json"
     return contracts_dir() / name
+
+
+def contract_artifact_name(app_slug: str) -> str:
+    return f"{app_slug}-contract.json"
+
+
+def _resolve_contract_source(app_slug: str, contract_path: str | Path | None = None) -> Path | None:
+    if contract_path:
+        candidate = Path(contract_path)
+        return candidate if candidate.is_file() else None
+    candidate = resolve_contract_path(app_slug)
+    if candidate.is_file():
+        return candidate
+    ws_file = workspace_path(app_slug)
+    if ws_file.exists():
+        stored = json.loads(ws_file.read_text(encoding="utf-8")).get("contract_path")
+        if stored:
+            stored_path = Path(stored)
+            if stored_path.is_file():
+                return stored_path
+    return None
+
+
+def sync_contract_artifact(app_slug: str, contract_path: str | Path | None = None) -> Path | None:
+    """Copy canonical contract into app output so it appears in the artifacts browser."""
+    src = _resolve_contract_source(app_slug, contract_path)
+    if not src:
+        return None
+    dest = ensure_app_dirs(app_slug) / contract_artifact_name(app_slug)
+    if dest.exists() and dest.stat().st_mtime >= src.stat().st_mtime:
+        return dest
+    shutil.copy2(src, dest)
+    return dest
 
 
 def load_workspace(app_slug: str) -> dict[str, Any]:
@@ -52,19 +86,25 @@ def save_workspace(app_slug: str, data: dict[str, Any]) -> Path:
 
 def _read_testcase_entry(root: Path, plan_id: str, yaml_file: Path) -> dict[str, str]:
     title = ""
+    case_count = "0"
+    case_titles = ""
     try:
         import yaml
 
         data = yaml.safe_load(yaml_file.read_text(encoding="utf-8")) or {}
         cases = data.get("cases") or []
+        case_count = str(len(cases))
         if cases:
             title = cases[0].get("title", "")
+            case_titles = " | ".join(c.get("title", "") for c in cases[:5] if c.get("title"))
     except Exception:
         pass
     return {
         "flow_id": plan_id,
         "path": str(yaml_file.relative_to(root)),
         "title": title,
+        "case_count": case_count,
+        "case_titles": case_titles,
     }
 
 
@@ -143,7 +183,12 @@ def sync_plans_from_disk(app_slug: str) -> dict[str, Any]:
 
 def ensure_workspace(app_slug: str, contract_path: str | None = None) -> dict[str, Any]:
     ws = sync_plans_from_disk(app_slug)
-    if contract_path:
+    canonical = Path(contract_path) if contract_path else resolve_contract_path(app_slug)
+    if canonical.is_file():
+        ws["contract_path"] = str(canonical)
+        sync_contract_artifact(app_slug, canonical)
+        save_workspace(app_slug, ws)
+    elif contract_path:
         ws["contract_path"] = contract_path
         save_workspace(app_slug, ws)
     return ws

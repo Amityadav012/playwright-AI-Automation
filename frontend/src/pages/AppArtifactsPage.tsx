@@ -15,7 +15,16 @@ export default function AppArtifactsPage() {
     if (!slug) return;
     api
       .listFiles(slug, "", true)
-      .then((res) => setFiles(res.entries.filter((e) => !e.is_dir)))
+      .then((res) => {
+        const flat = res.entries.filter((e) => !e.is_dir);
+        flat.sort((a, b) => {
+          const aContract = a.path.endsWith("-contract.json") ? 0 : 1;
+          const bContract = b.path.endsWith("-contract.json") ? 0 : 1;
+          if (aContract !== bContract) return aContract - bContract;
+          return a.path.localeCompare(b.path);
+        });
+        setFiles(flat);
+      })
       .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false));
   }, [slug]);
@@ -39,10 +48,10 @@ export default function AppArtifactsPage() {
   if (error && !files.length) return <p className="error">{error}</p>;
 
   return (
-    <div className="card">
+    <div className="card artifacts-page">
       <h2>Artifacts — {slug}</h2>
       <div className="artifact-layout">
-        <div className="file-tree">
+        <div className="file-tree" role="listbox" aria-label="Artifact files">
           {files.map((file) => (
             <button
               key={file.path}
@@ -57,13 +66,15 @@ export default function AppArtifactsPage() {
         <div className="content-viewer">
           {selected ? (
             <>
-              <div style={{ padding: "0.75rem 1rem", borderBottom: "1px solid #dde3ea", display: "flex", justifyContent: "space-between" }}>
-                <span>{selected} ({language})</span>
+              <div className="content-viewer-header">
+                <span className="content-viewer-path">
+                  {selected} ({language})
+                </span>
                 <a className="btn" href={api.downloadUrl(slug, selected)} download>
                   Download
                 </a>
               </div>
-              <pre>{content}</pre>
+              <pre className="content-viewer-body">{content}</pre>
             </>
           ) : (
             <p className="empty">Select a file to preview</p>

@@ -77,7 +77,7 @@ def testcase_yaml_prompt(
     intent_block = f"\nUser test intent:\n{user_intent}\n" if user_intent else ""
     flow_id = plan_id or "FLOW-01"
     return f"""
-You are generating ONE YAML test case for QA automation (E2E only).
+You are generating ONE YAML testcase file for QA automation (E2E only).
 
 Module: {module}
 Plan ID / Flow ID (must use exactly): {flow_id}
@@ -102,7 +102,7 @@ Return ONLY JSON (no markdown). The root object IS the flow (do not wrap in "flo
   "cases": [
     {{
       "id": "{flow_id}-H1",
-      "title": "human readable — covers full plan intent",
+      "title": "human readable case title",
       "type": "happy_path",
       "test_type": ["e2e"],
       "priority": "P0",
@@ -111,7 +111,7 @@ Return ONLY JSON (no markdown). The root object IS the flow (do not wrap in "flo
       "steps": ["..."],
       "assertions": ["page_title_visible"],
       "nav_links": [
-        {{ "label": "Home", "route": "/", "page_id": "home", "element_id": "home_2" }}
+        {{ "label": "Home", "route": "/", "element_id": "home_2" }}
       ],
       "element_refs": [
         {{ "element_id": "...", "action": "click", "page_id": "home" }}
@@ -122,16 +122,47 @@ Return ONLY JSON (no markdown). The root object IS the flow (do not wrap in "flo
 }}
 
 Rules:
-- Return ONE flow only (not an array) — the entire plan maps to this single testcase
+- Return ONE flow only (not an array) — the entire plan maps to this single testcase file
 - flow_id MUST be `{flow_id}`
-- cases array MUST have EXACTLY ONE case object covering the full plan intent
-- For navigation intents: put ALL nav links in ONE case's nav_links array (do not split into multiple flows)
-- When contract includes `home_navigation`, nav_links MUST match those entries only (same element_id / target_path)
+- cases array may contain 1–12 case objects; YOU decide how to split based on plan scope
+- Guidance (not hard rules): split by distinct user journeys, isolated nav links, or auth vs content; keep tightly coupled smoke in one case
+- Case ids: `{flow_id}-H1`, `{flow_id}-H2`, … sequentially
+- FORBIDDEN: inventing element_id, route, or page_id not in the contract slice
+- When contract includes `home_navigation`, nav_links MUST use only those entries (same element_id / target_path)
 - nav_links MUST be objects with label, route, and element_id — never plain strings
-- page_id in element_refs must be contract page_id (e.g. home), not PascalCase (not HomePage)
+- element_refs[].page_id must be contract page_id (e.g. home), not PascalCase (not HomePage)
 - Use semantic assertions: url_matches_route, page_title_visible, form_field_visible, login_button_clickable, link_visible, page_loads
 - element_refs must use real element_id values from contract
 - ui_pages use PascalCase Page names (e.g. home -> HomePage)
+"""
+
+
+def spec_case_prompt(
+    case: dict,
+    contract_slice: dict,
+    pom_names: list[str],
+    flow_id: str = "",
+) -> str:
+    case_id = case.get("id", "case")
+    return f"""
+Generate the body of ONE Playwright TypeScript test() block (no imports, no describe wrapper).
+
+Flow ID: {flow_id}
+Case:
+{json.dumps(case, indent=2)}
+
+Contract slice (ONLY allowed selectors and element_ids):
+{json.dumps(contract_slice, indent=2)}
+
+POM classes available: {", ".join(pom_names)}
+
+Rules:
+- Output ONLY the inside of test('{case_id}: ...', async ({{ page }}) => {{ ... }})
+- Use selectors.playwright from contract only — do NOT invent selectors
+- Use POM instances where possible
+- Do NOT use page.goto inside the test — assume beforeEach navigates to home
+- Include url/hash assertions from contract assert metadata when clicking nav links
+- Output ONLY code, no markdown fences
 """
 
 

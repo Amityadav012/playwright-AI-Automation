@@ -50,6 +50,8 @@ export interface TestcaseEntry {
   flow_id: string;
   path: string;
   title: string;
+  case_count?: string;
+  case_titles?: string;
 }
 
 export interface SpecEntry {
@@ -106,6 +108,12 @@ export const api = {
     ),
   downloadUrl: (slug: string, path: string) =>
     `${API_BASE}/api/apps/${slug}/files/download?path=${encodeURIComponent(path)}`,
+  reportUrl: (slug: string, subpath = "index.html") =>
+    `${API_BASE}/api/apps/${slug}/playwright-report/${subpath}`,
+  playwrightReportInfo: (slug: string) =>
+    request<{ exists: boolean; index_path: string | null }>(
+      `/api/apps/${slug}/playwright-report/info`,
+    ),
   extractContract: (body: {
     app_slug: string;
     url: string;
@@ -122,10 +130,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ app_slug: slug, plan_id }),
     }),
-  generateSpec: (slug: string, plan_id: string) =>
+  generateSpec: (slug: string, plan_id: string, use_llm_spec = false) =>
     request<JobResponse>(`/api/apps/${slug}/generate/spec`, {
       method: "POST",
-      body: JSON.stringify({ app_slug: slug, plan_id }),
+      body: JSON.stringify({ app_slug: slug, plan_id, use_llm_spec }),
     }),
   runSpec: (slug: string, plan_id: string, spec_path?: string) =>
     request<JobResponse>(`/api/apps/${slug}/run/spec`, {

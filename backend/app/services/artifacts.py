@@ -6,10 +6,11 @@ import zipfile
 from pathlib import Path
 
 from fastapi import HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from app.models.schemas import AppDetailResponse, AppSummary, FileEntry
 from lib.paths import app_output_dir, data_root
+from lib.workspace import sync_contract_artifact
 
 SKIP_DIRS = {"node_modules", ".git", "test-results", "__pycache__"}
 TEXT_EXTENSIONS = {".md", ".yaml", ".yml", ".json", ".ts", ".txt", ".example", ".spec.ts"}
@@ -21,6 +22,27 @@ LANGUAGE_MAP = {
     ".ts": "typescript",
     ".txt": "text",
 }
+
+REPORT_MIME_TYPES = {
+    ".html": "text/html",
+    ".htm": "text/html",
+    ".js": "application/javascript",
+    ".css": "text/css",
+    ".json": "application/json",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".svg": "image/svg+xml",
+    ".webm": "video/webm",
+    ".mp4": "video/mp4",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+}
+
+PLAYWRIGHT_REPORT_DIR = "playwright-report"
+PLAYWRIGHT_REPORT_INDEX = f"{PLAYWRIGHT_REPORT_DIR}/index.html"
 
 
 def _safe_path(app_slug: str, rel_path: str = "") -> Path:
@@ -63,6 +85,7 @@ def _read_manifest(app_dir: Path) -> dict | None:
 
 
 def get_app_detail(app_slug: str) -> AppDetailResponse:
+    sync_contract_artifact(app_slug)
     root = app_output_dir(app_slug)
     if not root.exists():
         raise HTTPException(status_code=404, detail=f"App not found: {app_slug}")
@@ -73,6 +96,7 @@ def get_app_detail(app_slug: str) -> AppDetailResponse:
 
 
 def list_files(app_slug: str, rel_path: str = "", recursive: bool = False) -> list[FileEntry]:
+    sync_contract_artifact(app_slug)
     target = _safe_path(app_slug, rel_path)
     if not target.is_dir():
         raise HTTPException(status_code=400, detail="Path is not a directory")
@@ -151,3 +175,43 @@ def download_file(app_slug: str, rel_path: str) -> StreamingResponse:
         )
 
     raise HTTPException(status_code=404, detail="Path not found")
+
+
+def _report_media_type(path: Path) -> str:
+    return REPORT_MIME_TYPES.get(path.suffix.lower(), "application/octet-stream")
+
+
+def _resolve_report_file(app_slug: str, subpath: str = "") -> Path:
+    rel = f"{PLAYWRIGHT_REPORT_DIR}/{subpath}" if subpath else PLAYWRIGHT_REPORT_INDEX
+    target = _safe_path(app_slug, rel)
+    if target.is_dir():
+        target = target / "index.html"
+        if not str(target.resolve()).startswith(str(app_output_dir(app_slug).resolve())):
+            raise HTTPException(status_code=400, detail="Invalid path")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="Report file not found")
+    return target
+
+
+def playwright_report_info(app_slug: str) -> dict:
+    index = _safe_path(app_slug, PLAYWRIGHT_REPORT_INDEX)
+    exists = index.is_file()
+    return {
+        "exists": exists,
+        "index_path": PLAYWRIGHT_REPORT_INDEX if exists else None,
+    }
+
+
+def serve_playwright_report(app_slug: str, subpath: str = "") -> FileResponse:
+    """Serve Playwright HTML report files inline for iframe viewing."""
+    if not subpath or subpath.endswith("/"):
+        subpath = (subpath.rstrip("/") + "/index.html") if subpath else "index.html"
+    target = _resolve_report_file(app_slug, subpath)
+    media_type = _report_media_type(target)
+    if media_type == "text/html":
+        media_type = "text/html; charset=utf-8"
+    return FileResponse(
+        path=target,
+        media_type=media_type,
+        headers={"Content-Disposition": "inline"},
+    )

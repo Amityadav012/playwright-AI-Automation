@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
 import { api, PlanEntry, pollJobUntilDone, Workspace } from "../api/client";
 import GenerateButton from "../components/GenerateButton";
+import PlaywrightReportModal from "../components/PlaywrightReportModal";
 
 function truncate(text: string, max = 60) {
   return text.length > max ? `${text.slice(0, max)}…` : text;
@@ -56,6 +57,9 @@ export default function AppWorkspacePage() {
   const [busy, setBusy] = useState<BusyKind>("");
   const [statusMessage, setStatusMessage] = useState("");
   const [runResult, setRunResult] = useState<RunResult | null>(null);
+  const [useLlmSpec, setUseLlmSpec] = useState(false);
+  const [showReportModal, setShowReportModal] = useState(false);
+  const [hasReport, setHasReport] = useState(false);
 
   const jobRunning = busy !== "";
 
@@ -79,6 +83,16 @@ export default function AppWorkspacePage() {
       })
       .catch((e: Error) => setError(e.message));
   }, [loadWorkspace, location.key]);
+
+  useEffect(() => {
+    if (!slug) {
+      setHasReport(false);
+      return;
+    }
+    api.playwrightReportInfo(slug)
+      .then((info) => setHasReport(info.exists))
+      .catch(() => setHasReport(false));
+  }, [slug, runResult?.reportPath]);
 
   const selectedPlan: PlanEntry | undefined = ws?.plans.find((p) => p.id === selectedPlanId);
   const testcase = selectedPlan?.testcases[0];
@@ -182,6 +196,11 @@ export default function AppWorkspacePage() {
           reportPath: job.result.report_path ?? undefined,
         };
         setRunResult(result);
+        if (slug) {
+          api.playwrightReportInfo(slug)
+            .then((info) => setHasReport(info.exists))
+            .catch(() => setHasReport(!!result.reportPath));
+        }
         if (!result.passed) {
           setError(`Test failed (exit code ${job.result.exit_code ?? "unknown"})`);
         }
@@ -217,7 +236,7 @@ export default function AppWorkspacePage() {
     if (!slug || !selectedPlanId) return;
     await runJob(
       "spec",
-      () => api.generateSpec(slug, selectedPlanId),
+      () => api.generateSpec(slug, selectedPlanId, useLlmSpec),
       "Playwright spec generated.",
     );
   }
@@ -306,7 +325,14 @@ export default function AppWorkspacePage() {
         </div>
         {selectedPlanId && (
           <p style={{ marginTop: "0.5rem" }}>
-            Status: {testcase ? `✓ ${testcase.path}` : "Not generated yet"}
+            Status:{" "}
+            {testcase
+              ? `✓ ${testcase.path}${
+                  testcase.case_count && testcase.case_count !== "0"
+                    ? ` (${testcase.case_count} case${testcase.case_count === "1" ? "" : "s"} in case.yaml)`
+                    : ""
+                }`
+              : "Not generated yet"}
           </p>
         )}
         <div style={{ marginTop: "0.75rem" }}>
@@ -365,6 +391,15 @@ export default function AppWorkspacePage() {
               )}
             </div>
             <div className="spec-actions">
+              <label className="llm-spec-toggle" style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                <input
+                  type="checkbox"
+                  checked={useLlmSpec}
+                  onChange={(e) => setUseLlmSpec(e.target.checked)}
+                  disabled={jobRunning}
+                />
+                Use LLM for complex steps
+              </label>
               <GenerateButton
                 loading={busy === "spec"}
                 disabled={!selectedPlanId || !testcase || jobRunning}
@@ -394,6 +429,21 @@ export default function AppWorkspacePage() {
                   {showSpecContent ? "▴" : "▾"}
                 </span>
               </button>
+              {runResult && (
+                <button
+                  type="button"
+                  className="btn-report"
+                  disabled={jobRunning || (!hasReport && !runResult.reportPath)}
+                  title={
+                    hasReport || runResult.reportPath
+                      ? "Open Playwright HTML report"
+                      : "No report yet — run Play again after rebuilding Docker"
+                  }
+                  onClick={() => setShowReportModal(true)}
+                >
+                  Show report
+                </button>
+              )}
             </div>
           </div>
         )}
@@ -410,17 +460,20 @@ docker compose -f docker-compose.yml -f docker-compose.headed.yml up -d --build`
           </div>
         )}
         {runResult && (
-          <p className={`run-result ${runResult.passed ? "run-result-pass" : "run-result-fail"}`}>
-            {runResult.passed ? "Passed" : "Failed"}
-            {runResult.reportPath && slug && (
-              <>
-                {" · "}
-                <a href={api.downloadUrl(slug, runResult.reportPath)} target="_blank" rel="noreferrer">
-                  View report
-                </a>
-              </>
+          <div className={`run-result-row ${runResult.passed ? "run-result-pass" : "run-result-fail"}`}>
+            <span>{runResult.passed ? "Passed" : "Failed"}</span>
+            <button
+              type="button"
+              className="btn-report btn-report-inline"
+              disabled={!hasReport && !runResult.reportPath}
+              onClick={() => setShowReportModal(true)}
+            >
+              Show report
+            </button>
+            {!hasReport && !runResult.reportPath && (
+              <span className="run-result-hint">(re-run Play to generate HTML report)</span>
             )}
-          </p>
+          </div>
         )}
         {showSpecContent && specPreview && (
           <div className="content-viewer spec-content-panel">
@@ -439,6 +492,14 @@ docker compose -f docker-compose.yml -f docker-compose.headed.yml up -d --build`
         </p>
       )}
       {error && <p className="error">{error}</p>}
+      {slug && (
+        <PlaywrightReportModal
+          open={showReportModal}
+          onClose={() => setShowReportModal(false)}
+          reportUrl={hasReport || runResult?.reportPath ? api.reportUrl(slug) : null}
+          passed={runResult?.passed ?? null}
+        />
+      )}
     </>
   );
 }

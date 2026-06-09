@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Query
 
-from app.models.schemas import AppDetailResponse, AppListResponse, FileContentResponse, FileListResponse
+from app.models.schemas import (
+    AppDetailResponse,
+    AppListResponse,
+    FileContentResponse,
+    FileListResponse,
+    PlaywrightReportInfoResponse,
+)
 from app.services import artifacts
 
 router = APIRouter(prefix="/api/apps", tags=["apps"])
@@ -37,3 +43,19 @@ def read_file_content(slug: str, path: str = Query(...)) -> FileContentResponse:
 @router.get("/{slug}/files/download")
 def download_file(slug: str, path: str = Query(...)):
     return artifacts.download_file(slug, path)
+
+
+@router.get("/{slug}/playwright-report/info", response_model=PlaywrightReportInfoResponse)
+def playwright_report_info(slug: str) -> PlaywrightReportInfoResponse:
+    info = artifacts.playwright_report_info(slug)
+    return PlaywrightReportInfoResponse(**info)
+
+
+@router.get("/{slug}/playwright-report")
+def playwright_report_index(slug: str):
+    return artifacts.serve_playwright_report(slug, "")
+
+
+@router.get("/{slug}/playwright-report/{path:path}")
+def playwright_report_file(slug: str, path: str):
+    return artifacts.serve_playwright_report(slug, path)
