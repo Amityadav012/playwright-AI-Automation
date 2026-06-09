@@ -19,8 +19,12 @@ from dotenv import load_dotenv
 from lib.assertions import map_assertions
 from lib.contract import Contract, load_contract, page_id_to_pom_name
 from lib.llm import LLMClient
+from lib.artifacts import spec_path as canonical_spec_path
+from lib.artifacts import spec_rel
+from lib.artifacts import testcase_path as canonical_testcase_path
 from lib.paths import ensure_app_dirs
 from lib.prompts import spec_body_prompt
+from lib.workspace import register_spec
 
 load_dotenv()
 
@@ -177,11 +181,147 @@ def generate_pom(page: dict, class_name: str) -> str:
     return "\n".join(lines)
 
 
-def _build_nav_links_constant(flow: dict) -> str:
-    cases = flow.get("cases", [])
-    nav_links: list[dict] = []
-    for case in cases:
-        nav_links.extend(case.get("nav_links") or [])
+def _normalize_page_id(page_id: str) -> str:
+    if not page_id:
+        return ""
+    if page_id.endswith("Page"):
+        stem = page_id[:-4]
+        if stem.lower() == "home":
+            return "home"
+        return re.sub(r"(?<!^)(?=[A-Z])", "-", stem).lower().replace("_", "-")
+    return page_id.lower().replace("_", "-")
+
+
+def _find_element(
+    contract: Contract,
+    *,
+    element_id: str | None = None,
+    label: str | None = None,
+    page_id: str | None = None,
+) -> dict | None:
+    pid = _normalize_page_id(page_id) if page_id else None
+    pages = contract.pages
+    if pid:
+        page = contract.get_page(pid)
+        pages = [page] if page else []
+
+    for page in pages or contract.pages:
+        for element in page.get("elements", []):
+            if element_id and element.get("element_id") == element_id:
+                return element
+            if label and element.get("label", "").strip().lower() == label.strip().lower():
+                return element
+
+    if element_id or label:
+        for page in contract.pages:
+            for element in page.get("elements", []):
+                if element_id and element.get("element_id") == element_id:
+                    return element
+                if label and element.get("label", "").strip().lower() == label.strip().lower():
+                    return element
+    return None
+
+
+def _nav_link_from_element(contract: Contract, element: dict) -> dict[str, str]:
+    label = element.get("label", "")
+    route = element.get("target_path") or "/"
+    if not route.startswith("/") and element.get("href"):
+        from urllib.parse import urlparse
+
+        route = urlparse(element["href"]).path or "/"
+    return {"label": label, "route": route or "/", "header": label}
+
+
+def _normalize_nav_link(
+    link: Any,
+    contract: Contract,
+    ref: dict | None = None,
+) -> dict[str, str] | None:
+    if isinstance(link, str):
+        label = link.strip()
+        if not label:
+            return None
+        element = None
+        if ref and isinstance(ref, dict):
+            element = _find_element(
+                contract,
+                element_id=ref.get("element_id"),
+                page_id=ref.get("page_id"),
+            )
+        if not element:
+            element = _find_element(contract, label=label)
+        if element:
+            return _nav_link_from_element(contract, element)
+        return {"label": label, "route": "/", "header": label}
+
+    if not isinstance(link, dict):
+        return None
+
+    label = str(link.get("label") or "")
+    route = str(link.get("route") or "")
+    header = str(link.get("header") or label)
+
+    if link.get("expected_url"):
+        from urllib.parse import urlparse
+
+        route = route or urlparse(str(link["expected_url"])).path or "/"
+
+    element_id = link.get("element_id")
+    if element_id and (not label or not route or route == "/"):
+        element = _find_element(contract, element_id=str(element_id))
+        if element:
+            enriched = _nav_link_from_element(contract, element)
+            label = label or enriched["label"]
+            route = route if route and route != "/" else enriched["route"]
+            header = header or enriched["header"]
+
+    if ref and isinstance(ref, dict) and ref.get("element_id") and not label:
+        element = _find_element(
+            contract,
+            element_id=ref.get("element_id"),
+            page_id=ref.get("page_id"),
+        )
+        if element:
+            enriched = _nav_link_from_element(contract, element)
+            label = enriched["label"]
+            route = route or enriched["route"]
+            header = header or enriched["header"]
+
+    if not label and not route:
+        return None
+    return {"label": label, "route": route or "/", "header": header or label}
+
+
+def _collect_nav_links(case: dict, contract: Contract) -> list[dict[str, str]]:
+    raw = case.get("nav_links") or []
+    refs = case.get("element_refs") or []
+    links: list[dict[str, str]] = []
+
+    if not raw:
+        for ref in refs:
+            if not isinstance(ref, dict):
+                continue
+            element = _find_element(
+                contract,
+                element_id=ref.get("element_id"),
+                page_id=ref.get("page_id"),
+            )
+            if element:
+                links.append(_nav_link_from_element(contract, element))
+        return links
+
+    for i, item in enumerate(raw):
+        ref = refs[i] if i < len(refs) and isinstance(refs[i], dict) else None
+        normalized = _normalize_nav_link(item, contract, ref)
+        if normalized:
+            links.append(normalized)
+    return links
+
+
+def _build_nav_links_constant(flow: dict, contract: Contract) -> str:
+    nav_links: list[dict[str, str]] = []
+    for case in flow.get("cases", []):
+        nav_links.extend(_collect_nav_links(case, contract))
     if not nav_links:
         return ""
 
@@ -211,7 +351,7 @@ def generate_spec(
     actor = actors[0] if actors else "public"
 
     pom_names = flow.get("ui_pages", [])
-    has_nav = any(case.get("nav_links") for case in flow.get("cases", []))
+    has_nav = any(_collect_nav_links(case, contract) for case in flow.get("cases", []))
     imports = ["import { test, expect } from '@playwright/test'"]
     if actor != "public":
         imports.append("import { hasAuthFixture, storageStatePath } from '../../helpers/auth-fixture'")
@@ -265,7 +405,7 @@ def generate_spec(
             title = case.get("title", case_id)
             describe_lines.append(f"  test('{case_id}: {title}', async ({{ page }}) => {{")
 
-            nav_links = case.get("nav_links") or []
+            nav_links = _collect_nav_links(case, contract)
             if nav_links:
                 describe_lines.append("    for (const link of NAV_LINKS) {")
                 describe_lines.append("      await page.goto(link.route)")
@@ -276,9 +416,11 @@ def generate_spec(
                     describe_lines.append(f"      {line}")
                 describe_lines.append("    }")
             else:
-                for ref in case.get("element_refs", [])[:5]:
+                for ref in case.get("element_refs", [])[:20]:
+                    if not isinstance(ref, dict):
+                        continue
                     eid = ref.get("element_id")
-                    page_data = contract.get_page(ref.get("page_id", ""))
+                    page_data = contract.get_page(_normalize_page_id(ref.get("page_id", "")))
                     if page_data:
                         for el in page_data.get("elements", []):
                             if el.get("element_id") == eid:
@@ -298,6 +440,74 @@ def generate_spec(
     return "\n".join(describe_lines)
 
 
+def generate_spec_for_plan(
+    contract: Contract,
+    app_slug: str,
+    plan_id: str,
+    llm: LLMClient | None = None,
+) -> list[Path]:
+    """1 plan → 1 case.yaml → 1 case.e2e.spec.ts."""
+    root = ensure_app_dirs(app_slug)
+    scaffold_app(root, contract)
+
+    yaml_path = canonical_testcase_path(root, plan_id)
+    if not yaml_path.exists():
+        legacy = list((root / "tests" / "testcases" / plan_id).glob("*.yaml"))
+        if legacy:
+            yaml_path = legacy[0]
+        else:
+            raise FileNotFoundError(f"No testcase YAML for plan {plan_id}")
+
+    with yaml_path.open(encoding="utf-8") as f:
+        flow_data = yaml.safe_load(f) or {}
+
+    written: list[Path] = []
+
+    page_id_map = {page_id_to_pom_name(p.get("page_id", "")): p for p in contract.pages}
+    for page_name in flow_data.get("ui_pages", []):
+        page_data = page_id_map.get(page_name)
+        if not page_data:
+            page_id_name = page_name.replace("Page", "").lower().replace("_", "-")
+            page_data = contract.get_page(page_id_name)
+        if not page_data:
+            log.warning("No contract page for POM %s — skipping", page_name)
+            continue
+
+        pom_path = root / "tests" / "scripts" / "pages" / f"{page_name}.page.ts"
+        nav_const = _build_nav_links_constant(flow_data, contract)
+        pom_content = (nav_const if nav_const else "") + generate_pom(page_data, page_name)
+        pom_path.write_text(pom_content, encoding="utf-8")
+        written.append(pom_path)
+        log.info("  Written POM: %s", pom_path)
+
+    spec_dir = canonical_spec_path(root, plan_id).parent
+    spec_dir.mkdir(parents=True, exist_ok=True)
+    out_spec = canonical_spec_path(root, plan_id)
+
+    for old in spec_dir.glob("*.e2e.spec.ts"):
+        if old != out_spec:
+            old.unlink()
+            log.info("  Removed extra spec: %s", old.name)
+
+    spec_content = generate_spec(flow_data, contract, yaml_path, llm=llm)
+    out_spec.write_text(spec_content, encoding="utf-8")
+    written.append(out_spec)
+    register_spec(app_slug, plan_id, plan_id, spec_rel(plan_id))
+    log.info("  Written spec: %s", out_spec)
+
+    return written
+
+
+def generate_specs_for_plan_flow(
+    contract: Contract,
+    app_slug: str,
+    plan_id: str,
+    flow_id: str | None = None,
+    llm: LLMClient | None = None,
+) -> list[Path]:
+    return generate_spec_for_plan(contract, app_slug, plan_id, llm=llm)
+
+
 def generate_specs_for_flow(
     contract: Contract,
     app_slug: str,
@@ -315,51 +525,21 @@ def generate_specs_for_flow(
         candidates.append((path, data))
 
     if not candidates:
-        flow_data = None
-        yaml_path = None
-    else:
-        def score(item: tuple[Path, dict]) -> int:
-            path, data = item
-            module = data.get("module", "")
-            if path.parent.name == module:
-                return 0
-            return 1
-
-        candidates.sort(key=score)
-        yaml_path, flow_data = candidates[0]
-
-    if not flow_data or not yaml_path:
         raise FileNotFoundError(f"No YAML found for flow {flow_id}")
 
-    module = flow_data.get("module", "general")
-    written: list[Path] = []
+    def score(item: tuple[Path, dict]) -> int:
+        path, data = item
+        module = data.get("module", "")
+        if path.parent.name == module:
+            return 0
+        if path.parent.name.startswith("plan-"):
+            return 0
+        return 1
 
-    page_id_map = {page_id_to_pom_name(p.get("page_id", "")): p for p in contract.pages}
-    for page_name in flow_data.get("ui_pages", []):
-        page_data = page_id_map.get(page_name)
-        if not page_data:
-            page_id = page_name.replace("Page", "").lower().replace("_", "-")
-            page_data = contract.get_page(page_id)
-        if not page_data:
-            log.warning("No contract page for POM %s — skipping", page_name)
-            continue
-
-        pom_path = root / "tests" / "scripts" / "pages" / f"{page_name}.page.ts"
-        nav_const = _build_nav_links_constant(flow_data)
-        pom_content = (nav_const if nav_const else "") + generate_pom(page_data, page_name)
-        pom_path.write_text(pom_content, encoding="utf-8")
-        written.append(pom_path)
-        log.info("  Written POM: %s", pom_path)
-
-    spec_dir = root / "tests" / "scripts" / "e2e" / module
-    spec_dir.mkdir(parents=True, exist_ok=True)
-    spec_path = spec_dir / f"{flow_id}.e2e.spec.ts"
-    spec_content = generate_spec(flow_data, contract, yaml_path, llm=llm)
-    spec_path.write_text(spec_content, encoding="utf-8")
-    written.append(spec_path)
-    log.info("  Written spec: %s", spec_path)
-
-    return written
+    candidates.sort(key=score)
+    yaml_path, flow_data = candidates[0]
+    plan_id = yaml_path.parent.name
+    return generate_specs_for_plan_flow(contract, app_slug, plan_id, flow_id, llm=llm)
 
 
 def generate_all_specs(

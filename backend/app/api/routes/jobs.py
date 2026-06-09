@@ -2,10 +2,24 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
-from app.models.schemas import JobListResponse, JobResponse, LogResponse, PipelineJobRequest
+from app.models.schemas import (
+    JobListResponse,
+    JobResponse,
+    LogResponse,
+    PipelineJobRequest,
+    ScrapeJobRequest,
+)
 from app.services import job_runner
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
+
+
+@router.post("/scrape", response_model=JobResponse, status_code=202)
+def create_scrape_job(request: ScrapeJobRequest) -> JobResponse:
+    try:
+        return job_runner.start_scrape_job(request)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/pipeline", response_model=JobResponse, status_code=202)

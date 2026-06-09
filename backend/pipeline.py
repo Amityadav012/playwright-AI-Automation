@@ -145,7 +145,7 @@ def main():
     steps = [s.strip() for s in args.steps.split(",") if s.strip()]
     if "all" in steps:
         steps = ["plan", "yaml", "spec"]
-    if args.url and "scrape" not in steps:
+    if args.url and "scrape" not in steps and steps != ["scrape"]:
         steps = ["scrape"] + steps
 
     contract_path = args.contract or str(contracts_dir() / f"{args.app}-contract.json")

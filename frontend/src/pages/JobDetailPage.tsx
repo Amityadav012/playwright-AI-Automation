@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { api, JobResponse } from "../api/client";
 
 export default function JobDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const redirectTo = (location.state as { redirectTo?: string } | null)?.redirectTo;
   const [job, setJob] = useState<JobResponse | null>(null);
   const [logs, setLogs] = useState("");
   const [error, setError] = useState("");
@@ -28,6 +31,12 @@ export default function JobDetailPage() {
         }
         if (jobRes.status === "queued" || jobRes.status === "running") {
           setTimeout(poll, 2000);
+        } else if (redirectTo && jobRes.status === "completed") {
+          const navState: Record<string, string> = {};
+          if (jobRes.result?.plan_id) {
+            navState.selectPlanId = jobRes.result.plan_id;
+          }
+          setTimeout(() => navigate(redirectTo, { state: navState }), 1500);
         }
       } catch (e) {
         if (active) setError(e instanceof Error ? e.message : "Failed to load job");
@@ -38,7 +47,7 @@ export default function JobDetailPage() {
     return () => {
       active = false;
     };
-  }, [id]);
+  }, [id, navigate, redirectTo]);
 
   if (error) return <p className="error">{error}</p>;
   if (!job) return <p>Loading job...</p>;
@@ -47,22 +56,24 @@ export default function JobDetailPage() {
     <>
       <div className="card">
         <h2>
-          Job {job.id}{" "}
+          Job {job.id} ({job.job_type}){" "}
           <span className={`badge badge-${job.status}`}>{job.status}</span>
         </h2>
-        <p>
-          App: <strong>{job.app_slug}</strong> · Steps: {job.request.steps.join(", ")}
-        </p>
+        <p>App: <strong>{job.app_slug}</strong></p>
         {job.result && (
           <p>
-            Completed steps: {job.result.steps_run.join(", ")} · Flows:{" "}
-            {job.result.flows.join(", ") || "none"}
+            Steps: {job.result.steps_run.join(", ")}
+            {job.result.plan_id && <> · Plan: {job.result.plan_id}</>}
+            {job.result.flow_id && <> · Flow: {job.result.flow_id}</>}
+            {job.result.flows?.length > 0 && <> · Flows: {job.result.flows.join(", ")}</>}
           </p>
         )}
         {job.error && <p className="error">{job.error}</p>}
         {job.status === "completed" && (
           <p>
-            <Link to={`/apps/${job.app_slug}`}>Browse generated artifacts →</Link>
+            <Link to={`/apps/${job.app_slug}/workspace`}>Open workspace →</Link>
+            {" · "}
+            <Link to={`/apps/${job.app_slug}`}>Browse artifacts</Link>
           </p>
         )}
       </div>

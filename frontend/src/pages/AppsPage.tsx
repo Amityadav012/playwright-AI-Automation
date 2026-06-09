@@ -26,7 +26,7 @@ export default function AppsPage() {
       <div className="card">
         <h2>Generated Apps</h2>
         {apps.length === 0 ? (
-          <p className="empty">No apps yet. <Link to="/run">Start a pipeline run</Link>.</p>
+          <p className="empty">No apps yet. <Link to="/run">Extract a contract</Link>.</p>
         ) : (
           <table>
             <thead>
@@ -43,7 +43,11 @@ export default function AppsPage() {
                   <td><strong>{app.slug}</strong></td>
                   <td>{app.generated_at ? new Date(app.generated_at).toLocaleString() : "—"}</td>
                   <td>{app.flows_count}</td>
-                  <td><Link to={`/apps/${app.slug}`}>Browse artifacts</Link></td>
+                  <td>
+                    <Link to={`/apps/${app.slug}/workspace`}>Workspace</Link>
+                    {" · "}
+                    <Link to={`/apps/${app.slug}`}>Artifacts</Link>
+                  </td>
                 </tr>
               ))}
             </tbody>

@@ -14,16 +14,46 @@ from typing import Any
 import yaml
 from dotenv import load_dotenv
 
+from lib.artifacts import testcase_path, testcase_rel
 from lib.contract import Contract, load_contract, page_id_to_pom_name
 from lib.llm import LLMClient
-from lib.overlap import check_overlaps, extract_flow_ids_from_plan
 from lib.paths import ensure_app_dirs
 from lib.prompts import testcase_yaml_prompt
+from lib.workspace import parse_plan_frontmatter, register_testcases
 
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
+
+
+def _extract_flow_from_llm_result(result: Any) -> dict[str, Any] | None:
+    """Accept flow wrapped as {flow}, {flows:[...]}, or at JSON root (per prompt)."""
+    if isinstance(result, list):
+        return result[0] if result and isinstance(result[0], dict) else None
+    if not isinstance(result, dict):
+        return None
+
+    flow = result.get("flow")
+    if isinstance(flow, dict):
+        return flow
+
+    flows = result.get("flows")
+    if isinstance(flows, list) and flows:
+        if len(flows) > 1:
+            log.warning("LLM returned %d flows — using first only (1 plan = 1 testcase)", len(flows))
+        if isinstance(flows[0], dict):
+            return flows[0]
+
+    testcase = result.get("testcase")
+    if isinstance(testcase, dict):
+        return testcase
+
+    # Prompt asks for the flow object at the root (module, flow_id, cases, …).
+    if result.get("cases") or result.get("flow_id"):
+        return result
+
+    return None
 
 
 def _normalize_flow(flow: dict[str, Any], module: str) -> dict[str, Any]:
@@ -60,46 +90,59 @@ def generate_testcases_for_plan(
     plan_path: Path,
     llm: LLMClient | None = None,
     skip_overlap: bool = False,
+    plan_id: str | None = None,
 ) -> list[Path]:
     llm = llm or LLMClient()
     root = ensure_app_dirs(app_slug)
-    module = plan_path.stem
+    meta = parse_plan_frontmatter(plan_path)
+    module = meta.get("module") or plan_path.stem
+    user_intent = meta.get("user_intent", "")
+    plan_id = plan_id or meta.get("plan_id") or plan_path.stem
     plan_text = plan_path.read_text(encoding="utf-8")
 
-    existing_ids: set[str] = set()
-    if not skip_overlap:
-        proposed_ids = extract_flow_ids_from_plan(plan_text)
-        report = check_overlaps(proposed_ids, root / "tests" / "testcases")
-        existing_ids = set(report.get("exact_duplicates", []))
-
     slice_data = contract.slice_for_module(module)
-    prompt = testcase_yaml_prompt(module, plan_text, slice_data)
-    result = llm.complete_json(prompt, temperature=0.0, max_tokens=4000)
+    if not slice_data.get("pages"):
+        slice_data = contract.trim_for_prompt()
+    prompt = testcase_yaml_prompt(
+        module, plan_text, slice_data, user_intent=user_intent, plan_id=plan_id
+    )
+    result = llm.complete_json(prompt, temperature=0.0, max_tokens=8000)
 
-    flows = result.get("flows", [])
-    if not flows:
-        raise ValueError(f"LLM returned no flows for plan {plan_path}")
+    flow = _extract_flow_from_llm_result(result)
+    if not flow:
+        preview = str(result)[:500] if result is not None else "(empty)"
+        raise ValueError(
+            f"LLM returned no flow for plan {plan_path}. Response preview: {preview}"
+        )
 
-    out_dir = root / "tests" / "testcases" / module
+    flow = _normalize_flow(flow, module)
+    flow["flow_id"] = plan_id
+
+    out_dir = root / "tests" / "testcases" / plan_id
     out_dir.mkdir(parents=True, exist_ok=True)
-    written: list[Path] = []
+    out_path = testcase_path(root, plan_id)
 
-    for flow in flows:
-        flow = _normalize_flow(flow, module)
-        flow_id = flow.get("flow_id")
-        if not flow_id:
-            log.warning("Skipping flow without flow_id")
-            continue
-        if flow_id in existing_ids:
-            log.info("  Skipping duplicate flow %s (already in testcases/)", flow_id)
-            continue
-        out_path = out_dir / f"{flow_id}.yaml"
-        with out_path.open("w", encoding="utf-8") as f:
-            yaml.dump(flow, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
-        written.append(out_path)
-        log.info("  Written: %s", out_path)
+    for old in out_dir.glob("*.yaml"):
+        if old != out_path:
+            old.unlink()
+            log.info("  Removed extra testcase: %s", old.name)
 
-    return written
+    with out_path.open("w", encoding="utf-8") as f:
+        yaml.dump(flow, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    log.info("  Written: %s", out_path)
+
+    title = ""
+    cases = flow.get("cases") or []
+    if cases:
+        title = cases[0].get("title", "")
+
+    register_testcases(
+        app_slug,
+        plan_id,
+        [{"flow_id": plan_id, "path": testcase_rel(plan_id), "title": title}],
+    )
+
+    return [out_path]
 
 
 def generate_all_testcases(

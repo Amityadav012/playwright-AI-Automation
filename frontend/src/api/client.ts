@@ -7,7 +7,9 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.detail || res.statusText || "Request failed");
+    const detail = body.detail;
+    const msg = typeof detail === "string" ? detail : JSON.stringify(detail) || res.statusText;
+    throw new Error(msg || "Request failed");
   }
   return res.json() as Promise<T>;
 }
@@ -23,27 +25,51 @@ export interface JobResult {
   manifest: string | null;
   steps_run: string[];
   flows: string[];
-}
-
-export interface PipelineJobRequest {
-  app_slug: string;
-  url?: string | null;
-  contract_filename?: string | null;
-  steps: string[];
-  modules: string[];
-  max_pages: number;
+  artifact_path: string | null;
+  plan_id: string | null;
+  flow_id: string | null;
 }
 
 export interface JobResponse {
   id: string;
+  job_type: "scrape" | "plan" | "testcase" | "spec" | "pipeline";
   status: "queued" | "running" | "completed" | "failed";
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
   app_slug: string;
-  request: PipelineJobRequest;
+  request: Record<string, unknown>;
   result: JobResult | null;
   error: string | null;
+}
+
+export interface TestcaseEntry {
+  flow_id: string;
+  path: string;
+  title: string;
+}
+
+export interface SpecEntry {
+  flow_id: string;
+  path: string;
+}
+
+export interface PlanEntry {
+  id: string;
+  user_intent: string;
+  plan_path: string;
+  created_at: string;
+  testcases: TestcaseEntry[];
+  specs: SpecEntry[];
+}
+
+export interface Workspace {
+  app_slug: string;
+  contract_path: string | null;
+  contract_exists: boolean;
+  base_url: string | null;
+  page_count: number;
+  plans: PlanEntry[];
 }
 
 export interface FileEntry {
@@ -66,6 +92,7 @@ export const api = {
     request<{ slug: string; manifest: Record<string, unknown> | null; file_count: number }>(
       `/api/apps/${slug}`,
     ),
+  getWorkspace: (slug: string) => request<Workspace>(`/api/apps/${slug}/workspace`),
   listFiles: (slug: string, path = "", recursive = false) =>
     request<{ path: string; entries: FileEntry[] }>(
       `/api/apps/${slug}/files?path=${encodeURIComponent(path)}&recursive=${recursive}`,
@@ -76,8 +103,27 @@ export const api = {
     ),
   downloadUrl: (slug: string, path: string) =>
     `${API_BASE}/api/apps/${slug}/files/download?path=${encodeURIComponent(path)}`,
-  startJob: (body: PipelineJobRequest) =>
-    request<JobResponse>("/api/jobs/pipeline", { method: "POST", body: JSON.stringify(body) }),
+  extractContract: (body: {
+    app_slug: string;
+    url: string;
+    contract_filename?: string | null;
+    max_pages: number;
+  }) => request<JobResponse>("/api/jobs/scrape", { method: "POST", body: JSON.stringify(body) }),
+  generatePlan: (slug: string, user_intent: string) =>
+    request<JobResponse>(`/api/apps/${slug}/generate/plan`, {
+      method: "POST",
+      body: JSON.stringify({ app_slug: slug, user_intent }),
+    }),
+  generateTestcase: (slug: string, plan_id: string) =>
+    request<JobResponse>(`/api/apps/${slug}/generate/testcase`, {
+      method: "POST",
+      body: JSON.stringify({ app_slug: slug, plan_id }),
+    }),
+  generateSpec: (slug: string, plan_id: string) =>
+    request<JobResponse>(`/api/apps/${slug}/generate/spec`, {
+      method: "POST",
+      body: JSON.stringify({ app_slug: slug, plan_id }),
+    }),
   getJob: (id: string) => request<JobResponse>(`/api/jobs/${id}`),
   listJobs: () => request<{ jobs: JobResponse[] }>("/api/jobs"),
   getLogs: (id: string, offset: number) =>
@@ -85,3 +131,16 @@ export const api = {
       `/api/jobs/${id}/logs?offset=${offset}`,
     ),
 };
+
+export async function pollJobUntilDone(
+  jobId: string,
+  intervalMs = 2000,
+): Promise<JobResponse> {
+  for (;;) {
+    const job = await api.getJob(jobId);
+    if (job.status === "completed" || job.status === "failed") {
+      return job;
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}

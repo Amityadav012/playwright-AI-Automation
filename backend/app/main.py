@@ -16,7 +16,7 @@ if str(_BACKEND_ROOT) not in sys.path:
 load_dotenv(_BACKEND_ROOT.parent / ".env")
 load_dotenv()
 
-from app.api.routes import apps, jobs  # noqa: E402
+from app.api.routes import apps, jobs, workspace  # noqa: E402
 from app.models.schemas import HealthResponse  # noqa: E402
 from lib.paths import data_root  # noqa: E402
 
@@ -37,6 +37,7 @@ app.add_middleware(
 
 app.include_router(jobs.router)
 app.include_router(apps.router)
+app.include_router(workspace.router)
 
 
 @app.get("/api/health", response_model=HealthResponse)

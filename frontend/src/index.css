@@ -120,12 +120,25 @@ label {
 
 input[type="text"],
 input[type="url"],
-input[type="number"] {
+input[type="number"],
+select,
+textarea {
   width: 100%;
   padding: 0.5rem 0.65rem;
   border: 1px solid #cbd5e1;
   border-radius: 6px;
   font-size: 0.95rem;
+}
+
+textarea {
+  resize: vertical;
+  font-family: inherit;
+}
+
+select:disabled,
+textarea:disabled {
+  opacity: 0.6;
+  background: #f8fafc;
 }
 
 .checkbox-group {
@@ -162,6 +175,37 @@ button:hover,
 button:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+.btn-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.spinner {
+  width: 1rem;
+  height: 1rem;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.job-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  font-size: 0.9rem;
+  color: #475569;
 }
 
 .note {
@@ -250,4 +294,141 @@ button:disabled {
   color: #64748b;
   padding: 2rem;
   text-align: center;
+}
+
+.playwright-panel {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 1rem;
+  align-items: start;
+}
+
+.spec-list {
+  border: 1px solid #dde3ea;
+  border-radius: 6px;
+  background: #f8fafc;
+  overflow: hidden;
+  min-height: 8rem;
+}
+
+.spec-list-header {
+  padding: 0.5rem 0.75rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #64748b;
+  border-bottom: 1px solid #dde3ea;
+  background: #fff;
+}
+
+.spec-list-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  color: #1a1a2e;
+  border: none;
+  border-bottom: 1px solid #eef2f6;
+  border-radius: 0;
+  padding: 0.65rem 0.75rem;
+  font-weight: 400;
+  cursor: pointer;
+}
+
+.spec-list-item:last-child {
+  border-bottom: none;
+}
+
+.spec-list-item:hover:not(:disabled) {
+  background: #f1f5f9;
+}
+
+.spec-list-item.active {
+  background: #dbeafe;
+  color: #1e40af;
+}
+
+.spec-list-name {
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.spec-list-path {
+  font-size: 0.75rem;
+  color: #64748b;
+  margin-top: 0.15rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.spec-list-item.active .spec-list-path {
+  color: #3b82f6;
+}
+
+.spec-list-empty {
+  margin: 0;
+  padding: 1.25rem 0.75rem;
+  font-size: 0.85rem;
+  color: #64748b;
+}
+
+.spec-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-width: 9.5rem;
+}
+
+.spec-actions button {
+  width: 100%;
+  justify-content: center;
+}
+
+.btn-play {
+  background: #059669;
+}
+
+.btn-play:hover:not(:disabled) {
+  background: #047857;
+}
+
+.btn-view {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  background: #fff;
+  color: #334155;
+  border: 1px solid #cbd5e1;
+}
+
+.btn-view:hover:not(:disabled) {
+  background: #f8fafc;
+  border-color: #94a3b8;
+}
+
+.btn-view.open {
+  background: #f1f5f9;
+  border-color: #64748b;
+}
+
+.btn-chevron {
+  font-size: 0.7rem;
+  line-height: 1;
+}
+
+.spec-content-panel {
+  margin-top: 0.75rem;
+  max-height: 360px;
+}
+
+.spec-content-header {
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid #dde3ea;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #475569;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }

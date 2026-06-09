@@ -4,8 +4,6 @@ App-agnostic tooling: scrape a website → UI contract JSON → test plans → Y
 
 Includes a **React web UI** and **FastAPI backend**, dockerized for local/dev use.
 
-Aligned with the [fpa-qa-test](../fpa-qa-test/) architecture (testplan → testcases → scripts), but driven by an auto-generated UI contract.
-
 ## Quick start (Docker)
 
 ```bash
@@ -17,34 +15,33 @@ docker compose up --build
 # API: http://localhost:8000/api/health
 ```
 
-## Project structure
+## Intent-driven workflow (default)
+
+1. **Extract Contract** — crawl target URL (`POST /api/jobs/scrape`). No plans or specs are generated automatically.
+2. **App Workspace** — describe what you want to test in plain language.
+3. **Generate Test Plan** — one focused plan per request (scoped to your intent).
+4. **Generate Test Case** — select a plan from the dropdown, then generate YAML.
+5. **Generate Playwright** — select a test case, then generate the E2E spec.
+
+Artifact hierarchy per plan:
 
 ```
-qa-automation/
-  backend/
-    app/                  # FastAPI service
-    pipeline.py           # Orchestrator
-    scraper.py            # Stage 0: crawl → contract JSON
-    generators/           # plan, yaml, spec generators
-    lib/                  # contract, llm, prompts, overlap, assertions
-  frontend/               # React + Vite UI
-  data/                   # Persisted storage (gitignored)
-    contracts/            # *-contract.json
-    output/{app}/         # Generated test repos
-    jobs/{id}/            # Job status + logs
-  docker-compose.yml
+data/output/{app}/
+  workspace.json
+  tests/testplan/{plan_id}.md
+  tests/testcases/{plan_id}/{FLOW-ID}.yaml
+  tests/scripts/e2e/{plan_id}/{FLOW-ID}.e2e.spec.ts
 ```
 
 ## Web UI
 
 | Page | Purpose |
 |------|---------|
-| **Apps** | List generated apps and recent pipeline jobs |
-| **New Run** | Start scrape/plan/yaml/spec pipeline |
+| **Apps** | List apps; open Workspace or Artifacts |
+| **Extract Contract** | Scrape target URL → contract JSON only |
+| **Workspace** | Intent input + cascading plan → testcase → Playwright dropdowns |
 | **Job detail** | Live status and logs |
-| **Artifacts** | Browse and download generated plans, YAML, specs |
-
-**Human review gates:** Edit test plans before `yaml`. Review YAML before `spec`.
+| **Artifacts** | Browse and download all generated files |
 
 ## API
 
@@ -52,16 +49,16 @@ qa-automation/
 |--------|------|-------------|
 | `GET` | `/api/health` | Health + OpenAI configured |
 | `GET` | `/api/apps` | List apps |
-| `GET` | `/api/apps/{slug}` | App manifest |
-| `GET` | `/api/apps/{slug}/files` | List artifacts |
-| `GET` | `/api/apps/{slug}/files/content?path=` | Read file |
-| `GET` | `/api/apps/{slug}/files/download?path=` | Download file/zip |
-| `POST` | `/api/jobs/pipeline` | Start pipeline job |
-| `GET` | `/api/jobs` | List jobs |
-| `GET` | `/api/jobs/{id}` | Job status |
-| `GET` | `/api/jobs/{id}/logs?offset=` | Tail logs |
+| `GET` | `/api/apps/{slug}/workspace` | Plan/testcase/spec hierarchy for dropdowns |
+| `GET` | `/api/apps/{slug}/contract` | Contract metadata |
+| `POST` | `/api/jobs/scrape` | Extract contract only |
+| `POST` | `/api/apps/{slug}/generate/plan` | `{ user_intent }` |
+| `POST` | `/api/apps/{slug}/generate/testcase` | `{ plan_id }` |
+| `POST` | `/api/apps/{slug}/generate/spec` | `{ plan_id, flow_id }` |
+| `POST` | `/api/jobs/pipeline` | Legacy full pipeline (optional) |
+| `GET` | `/api/jobs/{id}/logs` | Tail logs |
 
-Only one pipeline job runs at a time (returns `409` if busy).
+Only one job runs at a time (returns `409` if busy).
 
 ## CLI (without Docker)
 
@@ -69,62 +66,41 @@ Only one pipeline job runs at a time (returns `409` if busy).
 cd backend
 pip install -r requirements.txt
 playwright install chromium
-cp ../.env.example ../.env   # set OPENAI_API_KEY
+cp ../.env.example ../.env
 
-# Full pipeline (contract in data/contracts/)
+# Scrape only
+python pipeline.py --url https://dfsqa.beehyv.com --app dfsqa --steps scrape
+
+# Full pipeline (legacy)
 python pipeline.py \
   --contract ../data/contracts/bihar-contract.json \
   --app bihar-krishi \
   --steps plan,yaml,spec
-
-# Scrape + generate
-python pipeline.py \
-  --url https://staging.biharkrishi.in \
-  --app bihar-krishi \
-  --max-pages 20 \
-  --steps all
 ```
 
-### Run API locally
+## Project structure
 
-```bash
-cd backend
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
-
-### Run frontend locally
-
-```bash
-cd frontend
-npm install
-npm run dev
-# http://localhost:5173 (proxies /api to :8000)
+qa-automation/
+  backend/
+    app/                  # FastAPI service
+    lib/workspace.py      # Plan registry (workspace.json)
+    pipeline.py
+    scraper.py
+    generators/
+  frontend/
+  data/
+    contracts/
+    output/{app}/
+    jobs/
+  docker-compose.yml
 ```
-
-## Pipeline steps
-
-| Step | Output |
-|------|--------|
-| `scrape` | `data/contracts/{app}-contract.json` |
-| `plan` | `data/output/{app}/tests/testplan/*.md` |
-| `yaml` | `data/output/{app}/tests/testcases/{module}/*.yaml` |
-| `spec` | `data/output/{app}/tests/scripts/e2e/`, `pages/` |
 
 ## Run generated Playwright tests
 
 ```bash
-cd data/output/bihar-krishi
+cd data/output/{app}
 cp .env.qa.example .env.qa
-# Set QA_UI_BASE_URL=https://staging.biharkrishi.in
-npm install
-npx playwright install chromium
+npm install && npx playwright install chromium
 npm run test:smoke
 ```
-
-## Contract JSON (`contract_version: 1.0.0`)
-
-Produced by [backend/scraper.py](backend/scraper.py). See [QA-Implementation-Guide.docx](QA-Implementation-Guide.docx) for the full AI-assisted QA workflow.
-
-## Legacy
-
-[backend/test_generator.py](backend/test_generator.py) is **deprecated** — page-level stubs. Use `pipeline.py` + `generators/spec_generator.py` for flow-based E2E tests.
