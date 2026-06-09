@@ -21,7 +21,7 @@ from generators.test_plan_generator import generate_test_plans
 from generators.testcase_generator import generate_all_testcases
 from lib.contract import DEFAULT_MODULES, load_contract
 from lib.llm import LLMClient
-from lib.paths import PIPELINE_VERSION, app_output_dir, ensure_app_dirs
+from lib.paths import PIPELINE_VERSION, app_output_dir, contracts_dir, ensure_app_dirs
 from scraper import scrape_website
 
 load_dotenv()
@@ -148,7 +148,7 @@ def main():
     if args.url and "scrape" not in steps:
         steps = ["scrape"] + steps
 
-    contract_path = args.contract or f"{args.app}-contract.json"
+    contract_path = args.contract or str(contracts_dir() / f"{args.app}-contract.json")
     if "scrape" in steps and not args.url:
         parser.error("--url is required when scrape step is enabled")
 
