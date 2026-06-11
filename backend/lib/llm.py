@@ -1,29 +1,39 @@
-"""Shared OpenAI client helpers."""
+"""Claude Code CLI helpers — delegates LLM work to `claude -p`."""
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 import re
-from typing import Any, Optional
-
-from openai import OpenAI
+import subprocess
+from typing import Any
 
 log = logging.getLogger(__name__)
 
 
+def _messages_to_prompt(messages: list[dict[str, str]]) -> str:
+    parts: list[str] = []
+    for message in messages:
+        role = message.get("role", "user").upper()
+        parts.append(f"{role}:\n{message.get('content', '')}")
+    return "\n\n".join(parts)
+
+
 class LLMClient:
-    def __init__(self, model: str = "gpt-4o-mini"):
-        self.client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    def __init__(self, model: str = "claude-sonnet-4-6"):
         self.model = model
 
     def complete(self, prompt: str, temperature: float = 0.2, max_tokens: int = 4000) -> str:
-        return self.complete_messages(
-            [{"role": "user", "content": prompt}],
-            temperature=temperature,
-            max_tokens=max_tokens,
+        del temperature, max_tokens
+        result = subprocess.run(
+            ["claude", "-p", "--output-format", "json", "--model", self.model],
+            input=prompt,
+            capture_output=True,
+            text=True,
+            check=True,
         )
+        data = json.loads(result.stdout)
+        return data["result"].strip()
 
     def complete_messages(
         self,
@@ -31,13 +41,11 @@ class LLMClient:
         temperature: float = 0.2,
         max_tokens: int = 4000,
     ) -> str:
-        resp = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
+        return self.complete(
+            _messages_to_prompt(messages),
             temperature=temperature,
             max_tokens=max_tokens,
         )
-        return resp.choices[0].message.content.strip()
 
     def complete_json(self, prompt: str, temperature: float = 0.0, max_tokens: int = 4000) -> Any:
         return self.complete_json_messages(

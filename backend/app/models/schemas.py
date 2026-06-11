@@ -118,7 +118,7 @@ class AppListResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str
-    openai_configured: bool
+    claude_configured: bool
     data_root: str
 
 

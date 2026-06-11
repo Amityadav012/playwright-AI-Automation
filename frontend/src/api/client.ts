@@ -91,7 +91,7 @@ export interface FileContent {
 }
 
 export const api = {
-  health: () => request<{ status: string; openai_configured: boolean }>("/api/health"),
+  health: () => request<{ status: string; claude_configured: boolean }>("/api/health"),
   listApps: () => request<{ apps: AppSummary[] }>("/api/apps"),
   getApp: (slug: string) =>
     request<{ slug: string; manifest: Record<string, unknown> | null; file_count: number }>(
