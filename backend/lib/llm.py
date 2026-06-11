@@ -19,16 +19,44 @@ class LLMClient:
         self.model = model
 
     def complete(self, prompt: str, temperature: float = 0.2, max_tokens: int = 4000) -> str:
+        return self.complete_messages(
+            [{"role": "user", "content": prompt}],
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+
+    def complete_messages(
+        self,
+        messages: list[dict[str, str]],
+        temperature: float = 0.2,
+        max_tokens: int = 4000,
+    ) -> str:
         resp = self.client.chat.completions.create(
             model=self.model,
-            messages=[{"role": "user", "content": prompt}],
+            messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
         )
         return resp.choices[0].message.content.strip()
 
     def complete_json(self, prompt: str, temperature: float = 0.0, max_tokens: int = 4000) -> Any:
-        text = self.complete(prompt, temperature=temperature, max_tokens=max_tokens)
+        return self.complete_json_messages(
+            [{"role": "user", "content": prompt}],
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+
+    def complete_json_messages(
+        self,
+        messages: list[dict[str, str]],
+        temperature: float = 0.0,
+        max_tokens: int = 4000,
+    ) -> Any:
+        text = self.complete_messages(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
         return parse_json_response(text)
 
 
