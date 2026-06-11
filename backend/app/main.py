@@ -42,8 +42,9 @@ app.include_router(workspace.router)
 
 @app.get("/api/health", response_model=HealthResponse)
 def health() -> HealthResponse:
+    import shutil
     return HealthResponse(
         status="ok",
-        openai_configured=bool(os.getenv("OPENAI_API_KEY")),
+        claude_configured=bool(shutil.which("claude")),
         data_root=str(data_root()),
     )

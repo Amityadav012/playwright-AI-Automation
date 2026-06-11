@@ -2,7 +2,7 @@
 Website Scraper with LLM Intelligence
 --------------------------------------
 Crawls a website, extracts all pages and clickable elements with XPaths,
-and uses OpenAI to intelligently decide what pages are worth crawling.
+and uses Claude Code CLI to intelligently decide what pages are worth crawling.
 Output is a JSON file consumable by the test generator.
 """
 
@@ -11,6 +11,7 @@ import re
 import json
 import time
 import logging
+import subprocess
 from datetime import datetime, timezone
 from urllib.parse import urljoin, urlparse
 from dataclasses import dataclass, field, asdict
@@ -20,7 +21,6 @@ CONTRACT_VERSION = "1.1.0"
 
 from bs4 import BeautifulSoup
 from lxml import etree
-from openai import OpenAI
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright, Page, Browser
 
@@ -842,8 +842,14 @@ def extract_clickables(soup: BeautifulSoup, base_url: str) -> tuple[list[Clickab
 
 class LLMAnalyzer:
     def __init__(self):
-        self.client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-        self.model = "gpt-4o-mini"  # fast and cheap for analysis
+        self.model = "claude-haiku-4-5-20251001"  # fast and cheap for analysis
+
+    def _run(self, prompt: str) -> str:
+        result = subprocess.run(
+            ["claude", "-p", prompt, "--output-format", "json", "--model", self.model],
+            capture_output=True, text=True, check=True,
+        )
+        return json.loads(result.stdout)["result"].strip()
 
     def decide_which_urls_to_crawl(self, discovered_urls: list[str], base_url: str, already_crawled: list[str]) -> list[str]:
         """Ask LLM to pick the most important URLs to crawl next."""
@@ -866,12 +872,7 @@ Return ONLY a JSON array of selected URLs, no explanation.
 Maximum 15 URLs.
 """
         try:
-            resp = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0,
-            )
-            content = resp.choices[0].message.content.strip()
+            content = self._run(prompt)
             content = content.replace("```json", "").replace("```", "").strip()
             return json.loads(content)
         except Exception as e:
@@ -899,12 +900,7 @@ Respond ONLY with a JSON object (no markdown):
 }}
 """
         try:
-            resp = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0,
-            )
-            content = resp.choices[0].message.content.strip()
+            content = self._run(prompt)
             content = content.replace("```json", "").replace("```", "").strip()
             return json.loads(content)
         except Exception as e:
@@ -980,12 +976,7 @@ Rules:
 - Include every element_id, form_id, and form_id.field_id listed above.
 """
         try:
-            resp = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0,
-            )
-            content = resp.choices[0].message.content.strip()
+            content = self._run(prompt)
             content = content.replace("```json", "").replace("```", "").strip()
             return json.loads(content)
         except Exception as e:
