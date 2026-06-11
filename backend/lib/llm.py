@@ -16,8 +16,10 @@ class LLMClient:
         self.model = model
 
     def complete(self, prompt: str, temperature: float = 0.2, max_tokens: int = 4000) -> str:
+        # Use stdin to avoid OS ARG_MAX limits on large prompts
         result = subprocess.run(
-            ["claude", "-p", prompt, "--output-format", "json", "--model", self.model],
+            ["claude", "-p", "--output-format", "json", "--model", self.model],
+            input=prompt,
             capture_output=True,
             text=True,
             check=True,

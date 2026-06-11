@@ -846,7 +846,8 @@ class LLMAnalyzer:
 
     def _run(self, prompt: str) -> str:
         result = subprocess.run(
-            ["claude", "-p", prompt, "--output-format", "json", "--model", self.model],
+            ["claude", "-p", "--output-format", "json", "--model", self.model],
+            input=prompt,
             capture_output=True, text=True, check=True,
         )
         return json.loads(result.stdout)["result"].strip()
