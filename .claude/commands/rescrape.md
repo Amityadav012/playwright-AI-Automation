@@ -1,4 +1,4 @@
-Re-scrape the app to refresh the contract (merge mode), then summarize the diff and its impact on existing test cases. Usage: /rescrape <app> [seed paths, comma-separated]
+Scrape or re-scrape the app to create/refresh the contract (merge mode), then summarize the diff and its impact on existing test cases. Usage: /rescrape <app> [url] [seed paths, comma-separated]
 
 ---
 
@@ -6,6 +6,8 @@ Re-scrape the app to refresh the contract (merge mode), then summarize the diff 
 
 1. Read `data/output/{app}/workspace.json` → base URL, `contract_path`, existing `seed_paths`.
    Contract default: `data/contracts/{app}-contract.json`.
+   **First scrape of a new app** (no workspace.json and no contract yet): take the base URL
+   from $ARGUMENTS — if none was given, ask the user for it. Do not invent a URL.
 2. Merge seed paths: workspace.json `seed_paths` + any paths given in $ARGUMENTS.
 3. Load auth from `.env` via `load_scraper_credentials()` — never hardcode or echo secrets.
 
@@ -48,6 +50,9 @@ Tune speed while debugging: `QA_BUTTON_PROBE_LIMIT=5` in `.env`.
 ---
 
 ## After the scrape
+
+On a first scrape there is nothing to diff — just summarize pages/elements captured and
+flag any `login_redirect` pages, then skip to the suggestions in step 4.
 
 1. Read `{app}-contract-diff.md` next to the contract (if merge ran).
 2. Summarize pages/elements added vs stale.

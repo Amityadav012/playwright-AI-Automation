@@ -2,7 +2,7 @@
 
 App-agnostic tooling: scrape a website → UI contract JSON → test plans → YAML testcases → Playwright E2E specs.
 
-**Official workflow:** run each step locally in **Claude Code** or **Cursor** using [PROCESS.md](PROCESS.md) and the slash commands in `.claude/commands/`. No Docker or API key required when the `claude` CLI is installed and logged in.
+**Official workflow:** run each step locally in **Claude Code** or **Cursor** using [PROCESS.md](PROCESS.md) and the slash commands in `.claude/commands/`. No Docker or API key required when the `claude` CLI is installed and logged in. New to the process? Start with the step-by-step [GUIDE.md](GUIDE.md).
 
 ## Quick start (CLI + skills)
 
@@ -23,12 +23,14 @@ cp ../.env.example ../.env
 
 | Step | Command (Claude Code / Cursor) |
 |------|--------------------------------|
-| 1 Scrape | `/rescrape <app>` or `python scraper.py <url> --output ../data/contracts/<app>-contract.json` |
+| 1 Scrape | `/rescrape <app> <url>` or `python scraper.py <url> --output ../data/contracts/<app>-contract.json` |
 | 3 Test plan | `/testplan-gen <module>` |
-| 4 Test cases | `/testcase-gen <module>` |
+| 4 Test cases | `/overlap-analysis <module>` then `/testcase-gen <module>` |
 | 5 Selector audit | `/selector-audit <module>` |
-| 7 Playwright specs | `/playwright-gen <module> <FLOW-ID>` |
-| 9 Run tests | `/run-tests <module>` from `data/output/<app>/` |
+| 6 Fix selectors | `/rescrape <app> [seed paths]` |
+| 7 Test scripts | `/playwright-gen <module> <FLOW-ID>` (E2E), `/script-gen <module> <FLOW-ID>` (API) |
+| 8 Fixtures | `/fixture-fill <module> <FLOW-ID>` |
+| 9 Run + triage | `/run-tests <module>` then `/triage` |
 
 Artifacts are written under `data/output/{app}/` (local, gitignored):
 
@@ -67,6 +69,7 @@ v1.0.0 and v1.1.0 contracts still load.
 ```
 qa-automation/
   PROCESS.md              # End-to-end process (official workflow)
+  GUIDE.md                # Step-by-step guide for a new project (junior-friendly)
   .claude/commands/       # Slash-command skills for each step
   backend/
     scraper.py
