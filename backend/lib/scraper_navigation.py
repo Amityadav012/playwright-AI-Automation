@@ -326,6 +326,13 @@ def discover_button_routes(
             continue
 
         probed += 1
+        log.info(
+            "Button probe %d/%d: %r (%s)",
+            probed,
+            probe_limit,
+            candidate.text or candidate.aria_label or candidate.selector,
+            candidate.selector,
+        )
         try:
             page.locator(candidate.selector).first.click(timeout=10_000)
             time.sleep(delay)

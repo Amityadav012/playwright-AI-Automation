@@ -14,6 +14,9 @@ class ScrapeJobRequest(BaseModel):
     contract_filename: str | None = None
     max_pages: int = 20
     headed: bool = False
+    seed_paths: list[str] = Field(default_factory=list)
+    interact: bool = True
+    merge: bool = True
 
 
 class PlanJobRequest(BaseModel):
@@ -51,6 +54,9 @@ class PipelineJobRequest(BaseModel):
     modules: list[str] = Field(default_factory=lambda: ["auth", "navigation", "content"])
     max_pages: int = 20
     headed: bool = False
+    seed_paths: list[str] = Field(default_factory=list)
+    interact: bool = True
+    merge: bool = True
 
 
 class JobResult(BaseModel):

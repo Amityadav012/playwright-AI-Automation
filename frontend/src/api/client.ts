@@ -135,6 +135,9 @@ export const api = {
     contract_filename?: string | null;
     max_pages: number;
     headed?: boolean;
+    seed_paths?: string[];
+    interact?: boolean;
+    merge?: boolean;
   }) => request<JobResponse>("/api/jobs/scrape", { method: "POST", body: JSON.stringify(body) }),
   generatePlan: (slug: string, user_intent: string) =>
     request<JobResponse>(`/api/apps/${slug}/generate/plan`, {

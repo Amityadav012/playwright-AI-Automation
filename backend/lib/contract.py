@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-SUPPORTED_CONTRACT_VERSIONS = frozenset({"1.0.0", "1.1.0"})
-SUPPORTED_CONTRACT_VERSION = "1.1.0"
+SUPPORTED_CONTRACT_VERSIONS = frozenset({"1.0.0", "1.1.0", "1.2.0"})
+SUPPORTED_CONTRACT_VERSION = "1.2.0"
 
 MODULE_PAGE_TYPES: dict[str, set[str]] = {
     "auth": {"login"},

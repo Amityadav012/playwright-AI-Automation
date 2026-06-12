@@ -85,6 +85,9 @@ def _run_scrape(request: dict[str, Any]) -> dict[str, Any]:
         scrape_url=request["url"],
         max_pages=request.get("max_pages", 20),
         headed=bool(request.get("headed", False)),
+        seed_paths=request.get("seed_paths"),
+        interact=request.get("interact", True),
+        merge=request.get("merge", True),
     )
     ensure_workspace(app_slug, contract_path=contract_path)
     return {
@@ -208,6 +211,9 @@ def _run_pipeline(request: dict[str, Any]) -> dict[str, Any]:
         scrape_url=request.get("url"),
         max_pages=request.get("max_pages", 20),
         headed=bool(request.get("headed", False)),
+        seed_paths=request.get("seed_paths"),
+        interact=request.get("interact", True),
+        merge=request.get("merge", True),
     )
     if "scrape" in steps:
         ensure_workspace(app_slug, contract_path=contract_path)
