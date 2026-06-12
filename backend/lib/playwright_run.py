@@ -29,6 +29,27 @@ def headed_enabled() -> bool:
     return os.environ.get("PLAYWRIGHT_HEADED", "").lower() in ("1", "true", "yes")
 
 
+def display_available() -> bool:
+    return bool(os.environ.get("DISPLAY", "").strip())
+
+
+HEADED_DOCKER_HINT = (
+    "Headed browser requires a display. On Docker run:\n"
+    "  xhost +local:docker\n"
+    "  docker compose -f docker-compose.yml -f docker-compose.headed.yml up -d --build"
+)
+
+
+def resolve_scraper_headless(headed: bool) -> bool:
+    """Return Playwright headless flag for scrape jobs (headed=False shows the browser)."""
+    if not headed:
+        return True
+    if headed_enabled() or display_available():
+        log.info("Scrape will run with a visible Chromium window")
+        return False
+    raise RuntimeError(HEADED_DOCKER_HINT)
+
+
 def ensure_env_qa(app_root: Path, base_url: str) -> Path:
     env_path = app_root / ENV_QA_FILE
     line = f"QA_UI_BASE_URL={base_url.rstrip('/')}\n"

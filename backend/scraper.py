@@ -24,14 +24,19 @@ from lxml import etree
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright, Page, Browser
 
+from lib.llm import parse_json_response
+from lib.playwright_run import resolve_scraper_headless
 from lib.scraper_auth import authenticate_at_url, authenticate_page, is_login_gate, is_login_path
 from lib.scraper_credentials import (
+    button_probe_limit,
     default_login_url,
     resolve_auth_url,
     has_auth_credentials,
     load_scraper_credentials,
     merge_legacy_cli_credentials,
+    navigation_timeout_ms,
 )
+from lib.scraper_navigation import classify_link, discover_button_routes, extract_live_navigation
 
 load_dotenv()
 
@@ -42,20 +47,6 @@ STATIC_ASSET_EXTENSIONS = (
     ".pdf", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg",
     ".zip", ".css", ".js", ".woff", ".woff2", ".ico", ".mp4",
 )
-COMMON_STATIC_PATHS = (
-    "/sitemap",
-    "/privacypolicy",
-    "/screenreaderaccess",
-    "/accessibility-statement",
-    "/login",
-    "/home",
-    "/about",
-    "/contact",
-    "/help",
-    "/faq",
-    "/faqs",
-)
-
 # ─────────────────────────────────────────────
 # Data Models
 # ─────────────────────────────────────────────
@@ -66,7 +57,7 @@ class Link:
     raw_href: str                   # value from DOM before resolution
     text: str
     tag: str                        # a | button | area
-    category: str                   # internal_path | internal_hash | external | navigation_button | mailto | tel
+    category: str                   # internal_path | internal_hash | external | navigation_button | spa_route | mailto | tel
     crawlable: bool                 # safe to enqueue for multi-page crawl
     opens_new_tab: bool = False
     aria_label: Optional[str] = None
@@ -122,98 +113,24 @@ def _is_static_asset(url: str) -> bool:
 
 def _classify_link(raw_href: str, resolved_href: str, base_domain: str) -> tuple[str, bool]:
     """Return (category, crawlable)."""
-    if not raw_href and not resolved_href:
-        return "navigation_button", False
-
-    href = raw_href or resolved_href
-    lower = href.lower().strip()
-
-    if lower.startswith("mailto:"):
-        return "mailto", False
-    if lower.startswith("tel:"):
-        return "tel", False
-    if lower.startswith("javascript:") or lower in ("#", ""):
-        return "internal_hash", False
-
-    parsed = urlparse(resolved_href or href)
-    if parsed.netloc and parsed.netloc != base_domain:
-        return "external", False
-
-    if parsed.fragment and (not parsed.path or parsed.path in ("", "/")):
-        return "internal_hash", False
-    if "#" in href and not parsed.path:
-        return "internal_hash", False
-
-    if _is_static_asset(resolved_href):
-        return "internal_path", False
-
-    return "internal_path", True
+    return classify_link(raw_href, resolved_href, base_domain, _is_static_asset)
 
 
-def extract_links_from_page(page: Page, page_url: str, base_domain: str) -> list[Link]:
-    """Extract anchors and navigation buttons from the live DOM."""
-    try:
-        page.keyboard.press("Escape")
-    except Exception:
-        pass
+def _link_from_dict(item: dict) -> Link:
+    return Link(
+        href=item.get("href") or "",
+        raw_href=item.get("raw_href") or "",
+        text=item.get("text") or "",
+        tag=item.get("tag") or "a",
+        category=item.get("category") or "navigation_button",
+        crawlable=bool(item.get("crawlable")),
+        opens_new_tab=bool(item.get("opens_new_tab")),
+        aria_label=item.get("aria_label"),
+        region=item.get("region") or "unknown",
+    )
 
-    try:
-        raw_items = page.evaluate(
-            """() => {
-            const items = [];
-            const seen = new Set();
 
-            const push = (item) => {
-                const key = [item.tag, item.raw_href || '', item.text || '', item.aria_label || ''].join('|');
-                if (seen.has(key)) return;
-                seen.add(key);
-                items.push(item);
-            };
-
-            const regionFor = (el) => {
-                const nav = el.closest('header, footer, nav, [role="navigation"]');
-                if (!nav) return 'content';
-                const tag = nav.tagName.toLowerCase();
-                return tag === 'nav' ? 'nav' : tag;
-            };
-
-            document.querySelectorAll('a[href], area[href], [role="link"][href]').forEach((el) => {
-                const raw = el.getAttribute('href') || '';
-                push({
-                    tag: el.tagName.toLowerCase(),
-                    raw_href: raw,
-                    resolved_href: el.href || raw,
-                    text: (el.innerText || '').trim().slice(0, 120),
-                    aria_label: el.getAttribute('aria-label'),
-                    opens_new_tab: el.target === '_blank' || el.getAttribute('rel')?.includes('noopener'),
-                    region: regionFor(el),
-                });
-            });
-
-            document.querySelectorAll(
-                'button.footer-link, button.link-item, header button, nav button, [role="navigation"] button'
-            ).forEach((el) => {
-                const raw = el.getAttribute('href') || el.dataset?.href || '';
-                const text = (el.innerText || el.getAttribute('aria-label') || '').trim().slice(0, 120);
-                if (!text && !raw) return;
-                push({
-                    tag: 'button',
-                    raw_href: raw,
-                    resolved_href: raw ? new URL(raw, window.location.href).href : '',
-                    text,
-                    aria_label: el.getAttribute('aria-label'),
-                    opens_new_tab: false,
-                    region: regionFor(el),
-                });
-            });
-
-            return items;
-        }"""
-        )
-    except Exception as e:
-        log.warning(f"Live DOM link extraction failed for {page_url}: {e}")
-        return []
-
+def _raw_items_to_links(raw_items: list[dict], page_url: str, base_domain: str) -> list[Link]:
     links: list[Link] = []
     for item in raw_items:
         raw_href = (item.get("raw_href") or "").strip()
@@ -226,18 +143,28 @@ def extract_links_from_page(page: Page, page_url: str, base_domain: str) -> list
         else:
             category, crawlable = _classify_link(raw_href, resolved, base_domain)
 
-        links.append(Link(
-            href=resolved or raw_href,
-            raw_href=raw_href,
-            text=item.get("text", ""),
-            tag=item.get("tag", "a"),
-            category=category,
-            crawlable=crawlable,
-            opens_new_tab=bool(item.get("opens_new_tab")),
-            aria_label=item.get("aria_label"),
-            region=item.get("region") or "unknown",
-        ))
+        links.append(
+            Link(
+                href=resolved or raw_href,
+                raw_href=raw_href,
+                text=item.get("text", ""),
+                tag=item.get("tag", "a"),
+                category=category,
+                crawlable=crawlable,
+                opens_new_tab=bool(item.get("opens_new_tab")),
+                aria_label=item.get("aria_label"),
+                region=item.get("region") or "unknown",
+            )
+        )
     return links
+
+
+def extract_links_from_page(page: Page, page_url: str, base_domain: str) -> list[Link]:
+    """Extract anchors and navigation buttons from the live DOM."""
+    raw_items, _probe_candidates = extract_live_navigation(page)
+    if not raw_items:
+        log.warning("Live DOM link extraction returned no items for %s", page_url)
+    return _raw_items_to_links(raw_items, page_url, base_domain)
 
 
 def merge_unique_links(existing: list[Link], new_links: list[Link]) -> list[Link]:
@@ -535,7 +462,11 @@ def build_unified_elements(
             else (f"//{link.tag}[contains(text(),'{label[:30]}')]" if label else f"//{link.tag}")
         )
         role = "link" if link.tag == "a" else "button"
-        category = "navigation" if link.category in ("internal_path", "navigation_button") else link.category
+        category = (
+            "navigation"
+            if link.category in ("internal_path", "navigation_button", "spa_route")
+            else link.category
+        )
         stored_href = _normalize_href_for_storage(link.href, link.raw_href)
         target_path = _target_path_from_href(
             stored_href,
@@ -1065,18 +996,23 @@ Return ONLY JSON (no markdown):
   "success_hint": "url_path_not_login_or_dashboard"
 }}
 
+Credential key meanings (values are never provided):
+- QA_USERNAME: username, email, or user identifier field
+- QA_PASSWORD: password field
+- QA_TEST_MOBILE: phone/mobile number field (often before an OTP step)
+- QA_TEST_OTP: one-time password, verification code, or PIN field
+
 Rules:
+- Infer the login flow from the forms and buttons on THIS page only.
 - Use only credential_key values from the available keys list.
-- Prefer stable CSS selectors from field selectors.xpath or [name=...], [id=...], [data-testid=...].
-- Support multi-step OTP: mobile (QA_TEST_MOBILE) -> click Send OTP -> wait -> fill QA_TEST_OTP -> submit.
-- Support password flow: QA_USERNAME then QA_PASSWORD then submit.
+- Prefer stable CSS selectors from field selectors or [name=...], [id=...], [data-testid=...].
+- Multi-step flows: fill fields in UI order; insert click steps for intermediate actions (e.g. request code) and wait_ms when a field appears after an action.
 - If this is not a login page, return "steps": [].
 - Maximum 8 steps.
 """
         try:
             content = self._run(prompt)
-            content = content.replace("```json", "").replace("```", "").strip()
-            plan = json.loads(content)
+            plan = parse_json_response(content)
             if not isinstance(plan.get("steps"), list):
                 plan["steps"] = []
             return plan
@@ -1102,13 +1038,12 @@ class WebScraper:
         max_pages: int = 30,
         delay: float = 0.5,
         wait_until: str = "load",
-        probe_common_paths: bool = True,
         credentials: Optional[dict[str, str]] = None,
+        headed: bool = False,
     ):
         self.base_url = base_url.rstrip("/")
         self.base_domain = urlparse(base_url).netloc
         self.wait_until = wait_until
-        self.probe_common_paths = probe_common_paths
         self.username_selector = username_selector
         self.password_selector = password_selector
         self.submit_selector = submit_selector
@@ -1125,6 +1060,7 @@ class WebScraper:
         self.password = password or self.credentials.get("QA_PASSWORD")
         self.authenticated = False
         self._auth_attempted = False
+        self.headless = resolve_scraper_headless(headed)
         self.llm = LLMAnalyzer()
         self.visited: set[str] = set()
         self.scraped_page_urls: set[str] = set()
@@ -1140,14 +1076,18 @@ class WebScraper:
     def _get_page_html(self, page: Page, url: str) -> tuple[Optional[str], Optional[str]]:
         """Load a page and return (html, final_url_after_redirects)."""
         try:
-            page.goto(url, wait_until=self.wait_until, timeout=30000)
+            page.goto(url, wait_until=self.wait_until, timeout=navigation_timeout_ms())
             time.sleep(self.delay)
             return page.content(), self._normalise_url(page.url)
         except Exception as e:
             log.warning(f"Failed to load {url} with wait_until={self.wait_until}: {e}")
             if self.wait_until != "domcontentloaded":
                 try:
-                    page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                    page.goto(
+                        url,
+                        wait_until="domcontentloaded",
+                        timeout=navigation_timeout_ms(),
+                    )
                     time.sleep(self.delay)
                     return page.content(), self._normalise_url(page.url)
                 except Exception as fallback_error:
@@ -1251,26 +1191,33 @@ class WebScraper:
         for a in soup.find_all("a", href=True):
             href = urljoin(current_url, a["href"])
             normalised = self._normalise_url(href)
-            if (
-                self._is_same_domain(normalised)
-                and not _is_static_asset(normalised)
-            ):
+            if self._is_same_domain(normalised) and classify_link(
+                a["href"], href, self.base_domain, _is_static_asset
+            )[1]:
                 crawl_urls.add(normalised)
 
         return sorted(crawl_urls)
 
-    def _probe_common_paths(self) -> list[str]:
-        """Probe well-known static routes that SPAs often omit from anchor tags."""
-        if not self.probe_common_paths:
+    def _discover_button_routes(self, page: Page, page_url: str) -> list[Link]:
+        """Probe no-href buttons; record SPA routes discovered via URL change."""
+        if is_login_path(page_url) and not self.authenticated:
             return []
 
-        discovered: list[str] = []
-        for path in COMMON_STATIC_PATHS:
-            candidate = self._normalise_url(urljoin(self.base_url + "/", path.lstrip("/")))
-            if candidate in self.visited:
-                continue
-            discovered.append(candidate)
-        return discovered
+        limit = button_probe_limit()
+        if limit <= 0:
+            return []
+
+        route_dicts = discover_button_routes(
+            page,
+            page_url,
+            base_domain=self.base_domain,
+            normalise_url=self._normalise_url,
+            is_static_asset=_is_static_asset,
+            delay=self.delay,
+            probe_limit=limit,
+            navigation_timeout_ms=navigation_timeout_ms(),
+        )
+        return [_link_from_dict(item) for item in route_dicts]
 
     def _select_urls_to_crawl(
         self,
@@ -1298,7 +1245,7 @@ class WebScraper:
 
     def scrape(self) -> SiteMap:
         with sync_playwright() as pw:
-            browser: Browser = pw.chromium.launch(headless=True)
+            browser: Browser = pw.chromium.launch(headless=self.headless)
             context = browser.new_context()
             page = context.new_page()
 
@@ -1306,11 +1253,8 @@ class WebScraper:
             if login_target and has_auth_credentials(self.credentials):
                 authenticate_at_url(self, page, login_target)
 
-            # Start crawl queue with base URL + common static paths (SPA sites often hide these).
+            # Crawl only from the provided start URL; further pages come from discovered links.
             queue = [self._normalise_url(self.base_url)]
-            for probed in self._probe_common_paths():
-                if probed not in queue:
-                    queue.append(probed)
 
             while queue and len(self.visited) < self.max_pages:
                 url = queue.pop(0)
@@ -1352,6 +1296,14 @@ class WebScraper:
                 else:
                     self.sitemap.public_urls.append(page_url)
 
+                button_links = self._discover_button_routes(page, page_url)
+                if button_links:
+                    scraped.links = merge_unique_links(scraped.links, button_links)
+                    self.sitemap.all_links = merge_unique_links(self.sitemap.all_links, button_links)
+                    scraped.elements = build_unified_elements(
+                        scraped.links, scraped.clickables, self.base_url
+                    )
+
                 soup = BeautifulSoup(html, "html.parser")
                 crawl_candidates = self._discover_crawl_urls(soup, page_url, scraped.links)
                 unvisited = [u for u in crawl_candidates if u not in self.visited and u not in queue]
@@ -1361,9 +1313,15 @@ class WebScraper:
                         if candidate not in self.visited and candidate not in queue:
                             queue.append(candidate)
 
+                href_crawlable = sum(
+                    1
+                    for link in scraped.links
+                    if link.crawlable and link.category in ("internal_path", "spa_route")
+                )
+                button_routes = sum(1 for link in scraped.links if link.category == "spa_route")
                 log.info(
                     f"  Found {len(scraped.elements)} element(s), {len(scraped.forms)} form(s) "
-                    f"({sum(1 for l in scraped.links if l.crawlable)} crawlable path(s))"
+                    f"({href_crawlable} crawlable path(s), {button_routes} button route(s))"
                 )
 
             browser.close()
@@ -1455,8 +1413,8 @@ def scrape_website(
     submit_selector: str = "button[type='submit']",
     max_pages: int = 30,
     wait_until: str = "load",
-    probe_common_paths: bool = True,
     credentials: Optional[dict[str, str]] = None,
+    headed: bool = False,
 ) -> str:
     """
     Scrape a website and save a JSON sitemap for test generation.
@@ -1485,8 +1443,8 @@ def scrape_website(
         submit_selector=submit_selector,
         max_pages=max_pages,
         wait_until=wait_until,
-        probe_common_paths=probe_common_paths,
         credentials=credentials,
+        headed=headed,
     )
     sitemap = scraper.scrape()
     return save_sitemap(sitemap, output_path)
@@ -1512,11 +1470,6 @@ if __name__ == "__main__":
         choices=["load", "domcontentloaded", "networkidle"],
         help="Playwright navigation wait strategy (default: load)",
     )
-    parser.add_argument(
-        "--no-probe-common-paths",
-        action="store_true",
-        help="Skip probing common static routes like /sitemap and /privacypolicy",
-    )
     args = parser.parse_args()
 
     path = scrape_website(
@@ -1527,6 +1480,5 @@ if __name__ == "__main__":
         password=args.password,
         max_pages=args.max_pages,
         wait_until=args.wait_until,
-        probe_common_paths=not args.no_probe_common_paths,
     )
     print(f"\n✅ Done! Sitemap saved to: {path}")

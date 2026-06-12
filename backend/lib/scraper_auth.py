@@ -12,6 +12,7 @@ from lib.scraper_credentials import (
     FILLABLE_KEYS,
     available_fillable_keys,
     has_auth_credentials,
+    navigation_timeout_ms,
 )
 
 if TYPE_CHECKING:
@@ -33,6 +34,33 @@ AUTH_FIELD_HINTS = (
     "user_id",
 )
 
+# Fuzzy label hints — matched only against controls discovered on the current page.
+CREDENTIAL_AFFINITY: dict[str, tuple[tuple[str, int], ...]] = {
+    "QA_PASSWORD": (("password", 10),),
+    "QA_USERNAME": (("username", 9), ("email", 8), ("user id", 7), ("userid", 7), ("login id", 6)),
+    "QA_TEST_MOBILE": (("mobile", 10), ("phone", 9), ("tel", 8), ("contact", 7), ("cell", 6)),
+    "QA_TEST_OTP": (
+        ("otp", 10),
+        ("one-time", 9),
+        ("one time", 9),
+        ("verification", 8),
+        ("verify code", 8),
+        ("pin", 6),
+        ("passcode", 6),
+    ),
+}
+INTERMEDIATE_ACTION_HINTS = (
+    "send",
+    "request",
+    "get",
+    "resend",
+    "generate",
+    "continue",
+    "next",
+    "proceed",
+)
+SUBMIT_ACTION_HINTS = ("login", "sign in", "signin", "verify", "submit", "enter", "confirm")
+
 
 def is_login_path(url: str) -> bool:
     return bool(LOGIN_PATH_RE.search(urlparse(url).path or ""))
@@ -44,14 +72,7 @@ def forms_have_auth_fields(forms: list[dict]) -> bool:
             field_type = (field.get("type") or "").lower()
             if field_type == "password":
                 return True
-            haystack = " ".join(
-                [
-                    str(field.get("name") or ""),
-                    str(field.get("label") or ""),
-                    str(field.get("placeholder") or ""),
-                    str(field.get("field_id") or ""),
-                ]
-            ).lower()
+            haystack = _label_haystack(field)
             if any(hint in haystack for hint in AUTH_FIELD_HINTS):
                 return True
     return False
@@ -69,6 +90,13 @@ def auth_success(page_url: str, page_type: str) -> bool:
     return not is_login_path(page_url) and page_type != "login"
 
 
+def _label_haystack(item: dict) -> str:
+    return " ".join(
+        str(item.get(key) or "")
+        for key in ("label", "name", "placeholder", "aria_label", "field_id", "text")
+    ).lower()
+
+
 def _selector_from_playwright(pw: str) -> str | None:
     if not pw:
         return None
@@ -77,83 +105,207 @@ def _selector_from_playwright(pw: str) -> str | None:
         if text.startswith(prefix):
             inner = text[len(prefix) :].rstrip(")").strip()
             if inner.startswith(("'", '"')):
-                return inner[1 : inner.index(inner[0], 1)]
+                quote = inner[0]
+                end = inner.index(quote, 1)
+                return inner[1:end]
             return inner
     if text.startswith("page."):
         return None
     return text
 
 
-def _field_selector(field: dict) -> str | None:
-    selectors = field.get("selectors") or {}
-    pw = selectors.get("playwright") or ""
-    selector = _selector_from_playwright(pw)
+def _selector_for_control(item: dict) -> str | None:
+    selectors = item.get("selectors") or {}
+    selector = _selector_from_playwright(selectors.get("playwright") or "")
     if selector:
         return selector
-    name = field.get("name")
+    name = item.get("name")
     if name:
         return f"[name='{name}']"
-    field_id = field.get("field_id")
+    field_id = item.get("field_id")
     if field_id:
         return f"#{field_id}"
     return None
 
 
-def fallback_password_plan(
+def _score_field_for_credential(field: dict, credential_key: str) -> int:
+    haystack = _label_haystack(field)
+    field_type = (field.get("type") or "").lower()
+    score = 0
+    if credential_key == "QA_PASSWORD" and field_type == "password":
+        score = max(score, 12)
+    if credential_key == "QA_TEST_MOBILE" and field_type in ("tel", "number"):
+        score = max(score, 11)
+    for hint, weight in CREDENTIAL_AFFINITY.get(credential_key, ()):
+        if hint in haystack:
+            score = max(score, weight)
+    return score
+
+
+def _collect_fields(forms: list[dict]) -> list[dict]:
+    fields: list[dict] = []
+    for form in forms:
+        fields.extend(form.get("fields", []))
+    return fields
+
+
+def _match_credentials_to_fields(
+    fields: list[dict],
+    available_keys: list[str],
+) -> list[tuple[dict, str]]:
+    """Map discovered fields to env credential keys in DOM order."""
+    pairs: list[tuple[dict, str]] = []
+    used_keys: set[str] = set()
+    for field in fields:
+        best_key: str | None = None
+        best_score = 0
+        for key in available_keys:
+            if key in used_keys:
+                continue
+            score = _score_field_for_credential(field, key)
+            if score > best_score:
+                best_score = score
+                best_key = key
+        if best_key and best_score > 0 and _selector_for_control(field):
+            pairs.append((field, best_key))
+            used_keys.add(best_key)
+    return pairs
+
+
+def _button_selector_from_element(element: dict) -> str | None:
+    selectors = element.get("selectors") or {}
+    selector = _selector_from_playwright(selectors.get("playwright") or "")
+    if selector and not selector.startswith("page."):
+        return selector
+    field_id = element.get("field_id")
+    if field_id:
+        return f"#{field_id}"
+    name = element.get("name")
+    if name:
+        return f"[name='{name}']"
+    label = (element.get("label") or element.get("text") or "").strip()
+    if not label:
+        return None
+    escaped = label.replace("'", "\\'")
+    tag = element.get("tag") or "button"
+    if tag == "a":
+        return f"a:has-text('{escaped}')"
+    return f"button:has-text('{escaped}'), input[type='submit']:has-text('{escaped}')"
+
+
+def _find_button_by_hints(elements: list[dict], hints: tuple[str, ...]) -> str | None:
+    for element in elements:
+        if element.get("role") not in ("button", "link", None) and element.get("tag") not in (
+            "button",
+            "input",
+            "a",
+        ):
+            continue
+        haystack = _label_haystack(element)
+        if any(hint in haystack for hint in hints):
+            selector = _button_selector_from_element(element)
+            if selector:
+                return selector
+    return None
+
+
+def extract_live_auth_controls(page: Page) -> tuple[list[dict], list[dict]]:
+    """Read inputs and buttons from the live DOM (SPA-friendly, app-agnostic)."""
+    raw = page.evaluate(
+        """() => {
+        const fields = [];
+        for (const el of document.querySelectorAll('input, textarea, select')) {
+            const type = (el.type || 'text').toLowerCase();
+            if (type === 'hidden' || type === 'submit' || type === 'button') continue;
+            fields.push({
+                type,
+                name: el.name || '',
+                field_id: el.id || '',
+                label: (el.labels && el.labels[0] ? el.labels[0].innerText : '') || el.getAttribute('aria-label') || '',
+                placeholder: el.placeholder || '',
+            });
+        }
+        const buttons = [];
+        const pushButton = (el) => {
+            const text = (el.innerText || el.value || el.getAttribute('aria-label') || '').trim();
+            if (!text) return;
+            buttons.push({
+                tag: el.tagName.toLowerCase(),
+                role: 'button',
+                label: text.slice(0, 120),
+                name: el.name || '',
+                field_id: el.id || '',
+            });
+        };
+        document.querySelectorAll('button, input[type=submit], input[type=button]').forEach(pushButton);
+        document.querySelectorAll('a[role=button]').forEach(pushButton);
+        return { fields, buttons };
+    }"""
+    )
+    live_forms = [{"fields": raw.get("fields", [])}] if raw.get("fields") else []
+    live_elements = raw.get("buttons", [])
+    return live_forms, live_elements
+
+
+def fallback_auth_plan(
     forms: list[dict],
+    elements: list[dict],
     credentials: dict[str, str],
     *,
-    username_selector: str,
-    password_selector: str,
-    submit_selector: str,
+    page: Page | None = None,
 ) -> dict[str, Any]:
-    if not (credentials.get("QA_USERNAME") and credentials.get("QA_PASSWORD")):
-        return {"flow_type": "password", "steps": [], "success_hint": "url_path_not_login"}
+    """Build auth steps only from controls discovered on the page (static HTML + live DOM)."""
+    available_keys = available_fillable_keys(credentials)
+    if not available_keys:
+        return {"flow_type": "unknown", "steps": [], "success_hint": "url_path_not_login"}
+
+    merged_forms = list(forms)
+    merged_elements = list(elements)
+    if page is not None:
+        live_forms, live_elements = extract_live_auth_controls(page)
+        merged_forms.extend(live_forms)
+        merged_elements.extend(live_elements)
+
+    field_pairs = _match_credentials_to_fields(_collect_fields(merged_forms), available_keys)
+    if not field_pairs:
+        return {"flow_type": "unknown", "steps": [], "success_hint": "url_path_not_login"}
 
     steps: list[dict[str, Any]] = []
-    username_selector_used = False
-    password_selector_used = False
+    keys_in_order = [key for _field, key in field_pairs]
+    needs_intermediate_action = (
+        "QA_TEST_MOBILE" in keys_in_order and "QA_TEST_OTP" in keys_in_order
+    )
 
-    for form in forms:
-        for field in form.get("fields", []):
-            field_type = (field.get("type") or "").lower()
-            selector = _field_selector(field)
-            if not selector:
-                continue
-            haystack = " ".join(
-                [
-                    str(field.get("name") or ""),
-                    str(field.get("label") or ""),
-                    str(field.get("placeholder") or ""),
-                ]
-            ).lower()
-            if field_type == "password" or "password" in haystack:
-                steps.append(
-                    {"action": "fill", "selector": selector, "credential_key": "QA_PASSWORD"}
-                )
-                password_selector_used = True
-            elif any(k in haystack for k in ("email", "username", "user")):
-                steps.append(
-                    {"action": "fill", "selector": selector, "credential_key": "QA_USERNAME"}
-                )
-                username_selector_used = True
-            elif field_type in ("tel", "number", "text") and credentials.get("QA_TEST_MOBILE"):
-                if any(k in haystack for k in ("mobile", "phone", "otp")):
-                    key = "QA_TEST_OTP" if "otp" in haystack else "QA_TEST_MOBILE"
-                    steps.append({"action": "fill", "selector": selector, "credential_key": key})
+    for index, (field, credential_key) in enumerate(field_pairs):
+        if (
+            needs_intermediate_action
+            and credential_key == "QA_TEST_OTP"
+            and "QA_TEST_MOBILE" in keys_in_order[:index]
+        ):
+            intermediate = _find_button_by_hints(merged_elements, INTERMEDIATE_ACTION_HINTS)
+            if intermediate:
+                steps.append({"action": "click", "selector": intermediate})
+                steps.append({"wait_ms": 2000})
 
-    if not username_selector_used:
-        steps.insert(
-            0,
-            {"action": "fill", "selector": username_selector, "credential_key": "QA_USERNAME"},
-        )
-    if not password_selector_used:
-        steps.append(
-            {"action": "fill", "selector": password_selector, "credential_key": "QA_PASSWORD"}
-        )
-    steps.append({"action": "click", "selector": submit_selector})
+        selector = _selector_for_control(field)
+        if selector:
+            steps.append(
+                {"action": "fill", "selector": selector, "credential_key": credential_key}
+            )
+
+    submit_selector = _find_button_by_hints(merged_elements, SUBMIT_ACTION_HINTS)
+    if submit_selector:
+        steps.append({"action": "click", "selector": submit_selector})
+
+    flow_type = (
+        "otp"
+        if {"QA_TEST_MOBILE", "QA_TEST_OTP"} <= set(available_keys)
+        else "password"
+        if {"QA_USERNAME", "QA_PASSWORD"} <= set(available_keys)
+        else "mixed"
+    )
     return {
-        "flow_type": "password",
+        "flow_type": flow_type,
         "steps": steps,
         "success_hint": "url_path_not_login_or_dashboard",
     }
@@ -192,7 +344,7 @@ def execute_auth_plan(page: Page, plan: dict[str, Any], credentials: dict[str, s
             return False
 
     try:
-        page.wait_for_load_state("domcontentloaded", timeout=15000)
+        page.wait_for_load_state("domcontentloaded", timeout=navigation_timeout_ms())
     except Exception as exc:
         log.warning("Auth wait after steps failed: %s", exc)
     return True
@@ -231,13 +383,18 @@ def authenticate_page(
         available_keys=available_keys,
     )
     if not plan.get("steps"):
-        plan = fallback_password_plan(
+        plan = fallback_auth_plan(
             forms,
+            elements,
             scraper.credentials,
-            username_selector=scraper.username_selector,
-            password_selector=scraper.password_selector,
-            submit_selector=scraper.submit_selector,
+            page=page,
         )
+        if plan.get("steps"):
+            log.info(
+                "Using page-derived fallback auth plan (%d steps, flow=%s)",
+                len(plan["steps"]),
+                plan.get("flow_type", "unknown"),
+            )
 
     if not plan.get("steps"):
         log.warning("No auth steps produced for %s", url)
@@ -270,7 +427,7 @@ def authenticate_at_url(scraper: WebScraper, page: Page, url: str) -> bool:
     from bs4 import BeautifulSoup
 
     try:
-        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        page.goto(url, wait_until="domcontentloaded", timeout=navigation_timeout_ms())
         time.sleep(scraper.delay)
     except Exception as exc:
         log.warning("Failed to open auth URL %s: %s", url, exc)

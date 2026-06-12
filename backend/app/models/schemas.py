@@ -13,6 +13,7 @@ class ScrapeJobRequest(BaseModel):
     url: str
     contract_filename: str | None = None
     max_pages: int = 20
+    headed: bool = False
 
 
 class PlanJobRequest(BaseModel):
@@ -49,6 +50,7 @@ class PipelineJobRequest(BaseModel):
     steps: list[str] = Field(default_factory=list)
     modules: list[str] = Field(default_factory=lambda: ["auth", "navigation", "content"])
     max_pages: int = 20
+    headed: bool = False
 
 
 class JobResult(BaseModel):

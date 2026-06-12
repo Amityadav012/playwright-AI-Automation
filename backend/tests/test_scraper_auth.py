@@ -6,10 +6,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from lib.llm import parse_json_response
 from lib.scraper_auth import (
     auth_success,
     execute_auth_plan,
-    fallback_password_plan,
+    fallback_auth_plan,
     forms_have_auth_fields,
     is_login_gate,
     is_login_path,
@@ -105,7 +106,63 @@ def test_execute_auth_plan_runs_steps_in_order():
     page.locator.return_value.first.click.assert_called_once()
 
 
-def test_fallback_password_plan_uses_form_selectors():
+def test_parse_json_response_ignores_trailing_text():
+    payload = json_plan_otp() + "\n\nNote: use intermediate action before OTP."
+    plan = parse_json_response(payload)
+    assert plan["flow_type"] == "otp"
+    assert len(plan["steps"]) == 5
+
+
+def test_fallback_auth_plan_otp_from_discovered_controls():
+    forms = [
+        {
+            "fields": [
+                {
+                    "field_id": "mobile",
+                    "name": "mobileNumber",
+                    "type": "tel",
+                    "label": "Mobile Number",
+                    "selectors": {"playwright": "page.locator('[name=\"mobileNumber\"]')"},
+                },
+                {
+                    "field_id": "otp",
+                    "name": "otp",
+                    "type": "text",
+                    "label": "Enter OTP",
+                    "selectors": {"playwright": "page.locator('[name=\"otp\"]')"},
+                },
+            ]
+        }
+    ]
+    elements = [
+        {
+            "role": "button",
+            "label": "Send OTP",
+            "selectors": {"playwright": "page.locator('button.send-otp')"},
+        },
+        {
+            "role": "button",
+            "label": "Login",
+            "selectors": {"playwright": "page.locator('button.login')"},
+        },
+    ]
+    plan = fallback_auth_plan(
+        forms,
+        elements,
+        {"QA_TEST_MOBILE": "8827000000", "QA_TEST_OTP": "123456"},
+    )
+    keys = [step.get("credential_key") for step in plan["steps"] if step.get("action") == "fill"]
+    assert keys == ["QA_TEST_MOBILE", "QA_TEST_OTP"]
+    assert any(step.get("action") == "click" for step in plan["steps"])
+    assert any(step.get("wait_ms") for step in plan["steps"])
+
+
+def test_fallback_auth_plan_empty_without_discovered_controls():
+    plan = fallback_auth_plan([], [], {"QA_TEST_MOBILE": "8827000000", "QA_TEST_OTP": "123456"})
+    assert plan["steps"] == []
+
+
+def test_fallback_auth_plan_password_from_discovered_controls():
     forms = [
         {
             "form_id": "login_form",
@@ -127,15 +184,21 @@ def test_fallback_password_plan_uses_form_selectors():
             ],
         }
     ]
-    plan = fallback_password_plan(
+    elements = [
+        {
+            "role": "button",
+            "label": "Sign in",
+            "selectors": {"playwright": "page.locator('button.sign-in')"},
+        }
+    ]
+    plan = fallback_auth_plan(
         forms,
+        elements,
         {"QA_USERNAME": "u", "QA_PASSWORD": "p"},
-        username_selector="input[name=email]",
-        password_selector="input[type=password]",
-        submit_selector="button[type=submit]",
     )
     keys = [step.get("credential_key") for step in plan["steps"] if step.get("action") == "fill"]
     assert keys == ["QA_USERNAME", "QA_PASSWORD"]
+    assert any(step.get("action") == "click" for step in plan["steps"])
 
 
 def test_plan_auth_steps_uses_available_keys_only():

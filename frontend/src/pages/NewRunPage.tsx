@@ -8,6 +8,7 @@ export default function NewRunPage() {
   const [url, setUrl] = useState("https://dfsqa.beehyv.com");
   const [contractFilename, setContractFilename] = useState("");
   const [maxPages, setMaxPages] = useState(20);
+  const [headed, setHeaded] = useState(false);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
@@ -24,6 +25,7 @@ export default function NewRunPage() {
         url: url.trim(),
         contract_filename: contractFilename.trim() || null,
         max_pages: maxPages,
+        headed,
       });
       setStatusMessage("Crawling site and building contract…");
       const job = await pollJobUntilDone(started.id);
@@ -99,6 +101,28 @@ export default function NewRunPage() {
             disabled={submitting}
           />
         </div>
+
+        <div className="checkbox-group">
+          <label htmlFor="headedScrape">
+            <input
+              id="headedScrape"
+              type="checkbox"
+              checked={headed}
+              onChange={(e) => setHeaded(e.target.checked)}
+              disabled={submitting}
+            />
+            Show browser while scraping (headed)
+          </label>
+        </div>
+
+        {headed && (
+          <p className="note" style={{ marginTop: 0 }}>
+            Opens a visible Chromium window on your desktop. From the <code>qa-automation</code>{" "}
+            folder run <code>xhost +local:docker</code> then{" "}
+            <code>docker compose -f docker-compose.yml -f docker-compose.headed.yml up -d --build</code>
+            .
+          </p>
+        )}
 
         {error && <p className="error">{error}</p>}
         {submitting && statusMessage && (

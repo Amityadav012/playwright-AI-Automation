@@ -73,4 +73,12 @@ def parse_json_response(text: str) -> Any:
     cleaned = re.sub(r"^```json\s*", "", cleaned)
     cleaned = re.sub(r"^```\s*", "", cleaned)
     cleaned = re.sub(r"\s*```$", "", cleaned)
-    return json.loads(cleaned)
+    cleaned = cleaned.strip()
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        start = cleaned.find("{")
+        if start < 0:
+            raise
+        obj, _end = json.JSONDecoder().raw_decode(cleaned[start:])
+        return obj

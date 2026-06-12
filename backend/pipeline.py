@@ -69,6 +69,7 @@ def run_pipeline(
     modules: list[str] | None = None,
     scrape_url: str | None = None,
     max_pages: int = 20,
+    headed: bool = False,
 ) -> dict:
     modules = modules or list(DEFAULT_MODULES)
     steps_run: list[str] = []
@@ -80,6 +81,7 @@ def run_pipeline(
             output_path=contract_path,
             max_pages=max_pages,
             credentials=load_scraper_credentials(),
+            headed=headed,
         )
         steps_run.append("scrape")
 

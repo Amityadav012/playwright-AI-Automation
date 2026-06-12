@@ -18,6 +18,27 @@ AUTH_ENV_KEYS = (
 
 FILLABLE_KEYS = ("QA_USERNAME", "QA_PASSWORD", "QA_TEST_MOBILE", "QA_TEST_OTP")
 
+DEFAULT_NAVIGATION_TIMEOUT_MS = 60_000
+DEFAULT_BUTTON_PROBE_LIMIT = 30
+
+
+def button_probe_limit() -> int:
+    """Max no-href button clicks per page during scrape (QA_BUTTON_PROBE_LIMIT)."""
+    raw = os.getenv("QA_BUTTON_PROBE_LIMIT", str(DEFAULT_BUTTON_PROBE_LIMIT)).strip()
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return DEFAULT_BUTTON_PROBE_LIMIT
+
+
+def navigation_timeout_ms() -> int:
+    """Playwright page.goto / load-state timeout (override via QA_NAVIGATION_TIMEOUT_MS)."""
+    raw = os.getenv("QA_NAVIGATION_TIMEOUT_MS", str(DEFAULT_NAVIGATION_TIMEOUT_MS)).strip()
+    try:
+        return max(5_000, int(raw))
+    except ValueError:
+        return DEFAULT_NAVIGATION_TIMEOUT_MS
+
 
 def load_scraper_credentials() -> dict[str, str]:
     """Return non-empty auth-related env vars (dotenv should be loaded by caller)."""
