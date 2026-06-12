@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
 import { api, PlanEntry, pollJobUntilDone, Workspace } from "../api/client";
 import GenerateButton from "../components/GenerateButton";
-import PlaywrightReportModal from "../components/PlaywrightReportModal";
+import PlaywrightReportModal, { ReportView } from "../components/PlaywrightReportModal";
 
 function truncate(text: string, max = 60) {
   return text.length > max ? `${text.slice(0, max)}…` : text;
@@ -13,7 +13,14 @@ function basename(path: string) {
 }
 
 type WorkspaceNavState = { selectPlanId?: string };
-type BusyKind = "" | "plan" | "testcase" | "spec" | "run";
+type BusyKind = "" | "plan" | "testcase" | "spec" | "run" | "allure";
+
+function downloadArtifact(url: string, filename: string) {
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+}
 
 type RunResult = { passed: boolean; reportPath?: string };
 
@@ -60,6 +67,8 @@ export default function AppWorkspacePage() {
   const [useLlmSpec, setUseLlmSpec] = useState(false);
   const [showReportModal, setShowReportModal] = useState(false);
   const [hasReport, setHasReport] = useState(false);
+  const [allureReportExists, setAllureReportExists] = useState(false);
+  const [reportView, setReportView] = useState<ReportView>("playwright");
 
   const jobRunning = busy !== "";
 
@@ -84,21 +93,40 @@ export default function AppWorkspacePage() {
       .catch((e: Error) => setError(e.message));
   }, [loadWorkspace, location.key]);
 
-  useEffect(() => {
+  const refreshReportInfo = useCallback(async () => {
     if (!slug) {
       setHasReport(false);
+      setAllureReportExists(false);
       return;
     }
-    api.playwrightReportInfo(slug)
-      .then((info) => setHasReport(info.exists))
-      .catch(() => setHasReport(false));
-  }, [slug, runResult?.reportPath]);
+    try {
+      const [pw, allure] = await Promise.all([
+        api.playwrightReportInfo(slug),
+        api.allureReportInfo(slug),
+      ]);
+      setHasReport(pw.exists);
+      setAllureReportExists(allure.exists);
+    } catch {
+      setHasReport(false);
+      setAllureReportExists(false);
+    }
+  }, [slug]);
+
+  useEffect(() => {
+    refreshReportInfo();
+  }, [refreshReportInfo, runResult?.reportPath]);
+
+  useEffect(() => {
+    if (!showReportModal) return;
+    refreshReportInfo();
+  }, [showReportModal, refreshReportInfo]);
 
   const selectedPlan: PlanEntry | undefined = ws?.plans.find((p) => p.id === selectedPlanId);
   const testcase = selectedPlan?.testcases[0];
   const specs = selectedPlan?.specs ?? [];
   const specPathsKey = specs.map((s) => s.path).join("|");
   const hasSpec = specs.length > 0;
+  const hasAnySpec = (ws?.plans ?? []).some((p) => (p.specs?.length ?? 0) > 0);
 
   useEffect(() => {
     if (!slug || !selectedPlan) {
@@ -197,9 +225,7 @@ export default function AppWorkspacePage() {
         };
         setRunResult(result);
         if (slug) {
-          api.playwrightReportInfo(slug)
-            .then((info) => setHasReport(info.exists))
-            .catch(() => setHasReport(!!result.reportPath));
+          refreshReportInfo();
         }
         if (!result.passed) {
           setError(`Test failed (exit code ${job.result.exit_code ?? "unknown"})`);
@@ -248,6 +274,37 @@ export default function AppWorkspacePage() {
       () => api.runSpec(slug, selectedPlanId, selectedSpecPath),
       "Test run finished.",
     );
+  }
+
+  async function handleRunAllureSuite() {
+    if (!slug) return;
+    setError("");
+    setBusy("allure");
+    setStatusMessage("Running full test suite and building Allure report…");
+    try {
+      const started = await api.runAllureSuite(slug);
+      const job = await pollJobUntilDone(started.id);
+      if (job.status === "failed") {
+        setError(job.error || "Allure job failed");
+        return;
+      }
+      const passed = job.result?.passed;
+      setStatusMessage(
+        passed === false
+          ? "Tests failed — Allure report downloaded"
+          : "Allure report downloaded",
+      );
+      setReportView("allure");
+      await refreshReportInfo();
+      downloadArtifact(api.downloadUrl(slug, "allure-report"), `${slug}-allure-report.zip`);
+      if (passed === false) {
+        setError(`Some tests failed (exit code ${job.result?.exit_code ?? "unknown"})`);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed");
+    } finally {
+      setBusy("");
+    }
   }
 
   if (!slug) return null;
@@ -429,21 +486,33 @@ export default function AppWorkspacePage() {
                   {showSpecContent ? "▴" : "▾"}
                 </span>
               </button>
-              {runResult && (
+              <div className="spec-report-actions">
+                {runResult && (
+                  <button
+                    type="button"
+                    className="btn-report"
+                    disabled={jobRunning || (!hasReport && !runResult.reportPath)}
+                    title={
+                      hasReport || runResult.reportPath
+                        ? "Open Playwright HTML report"
+                        : "No report yet — run Play again after rebuilding Docker"
+                    }
+                    onClick={() => setShowReportModal(true)}
+                  >
+                    Show report
+                  </button>
+                )}
                 <button
                   type="button"
-                  className="btn-report"
-                  disabled={jobRunning || (!hasReport && !runResult.reportPath)}
-                  title={
-                    hasReport || runResult.reportPath
-                      ? "Open Playwright HTML report"
-                      : "No report yet — run Play again after rebuilding Docker"
-                  }
-                  onClick={() => setShowReportModal(true)}
+                  className={`btn-report btn-report-allure${busy === "allure" ? " btn-loading" : ""}`}
+                  disabled={!hasAnySpec || jobRunning}
+                  title="Run all specs headless, build Allure HTML, and download a zip (may take several minutes)"
+                  onClick={handleRunAllureSuite}
                 >
-                  Show report
+                  {busy === "allure" && <span className="spinner" aria-hidden="true" />}
+                  {busy === "allure" ? "Generating…" : "Generate Allure report"}
                 </button>
-              )}
+              </div>
             </div>
           </div>
         )}
@@ -497,6 +566,10 @@ docker compose -f docker-compose.yml -f docker-compose.headed.yml up -d --build`
           open={showReportModal}
           onClose={() => setShowReportModal(false)}
           reportUrl={hasReport || runResult?.reportPath ? api.reportUrl(slug) : null}
+          allureReportUrl={allureReportExists ? api.allureReportUrl(slug) : null}
+          reportView={reportView}
+          onReportViewChange={setReportView}
+          allureReportExists={allureReportExists}
           passed={runResult?.passed ?? null}
         />
       )}

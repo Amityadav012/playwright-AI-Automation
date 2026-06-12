@@ -16,10 +16,12 @@ from dotenv import load_dotenv
 
 from lib.artifacts import testcase_path, testcase_rel
 from lib.contract import Contract, load_contract, page_id_to_pom_name
+from generators.test_plan_generator import load_plan_contract_slice
+from lib.contract_slimmer import slim_contract_for_intent
 from lib.contract_validate import validate_flow
 from lib.llm import LLMClient
 from lib.paths import ensure_app_dirs
-from lib.prompts import testcase_yaml_prompt
+from lib.prompts import build_testcase_messages
 from lib.workspace import parse_plan_frontmatter, register_testcases
 
 load_dotenv()
@@ -104,13 +106,17 @@ def generate_testcases_for_plan(
     plan_id = plan_id or meta.get("plan_id") or plan_path.stem
     plan_text = plan_path.read_text(encoding="utf-8")
 
-    slice_data = contract.slice_for_module(module)
-    if not slice_data.get("pages"):
-        slice_data = contract.trim_for_prompt()
-    prompt = testcase_yaml_prompt(
+    slice_data = load_plan_contract_slice(root, meta)
+    if slice_data is None and user_intent.strip():
+        _, slice_data = slim_contract_for_intent(contract, user_intent)
+    elif slice_data is None:
+        slice_data = contract.slice_for_module(module)
+        if not slice_data.get("pages"):
+            slice_data = contract.trim_for_prompt()
+    messages = build_testcase_messages(
         module, plan_text, slice_data, user_intent=user_intent, plan_id=plan_id
     )
-    result = llm.complete_json(prompt, temperature=0.0, max_tokens=8000)
+    result = llm.complete_json_messages(messages, temperature=0.0, max_tokens=8000)
 
     flow = _extract_flow_from_llm_result(result)
     if not flow:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 
 from app.models.schemas import (
+    AllureJobRequest,
     ContractInfoResponse,
     PlanJobRequest,
     RunSpecJobRequest,
@@ -114,5 +115,18 @@ def run_spec(slug: str, body: RunSpecJobRequest):
         raise HTTPException(status_code=404, detail="Contract not found — extract contract first")
     try:
         return job_runner.start_job("run", body.model_dump())
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/{slug}/run/allure", status_code=202)
+def run_allure(slug: str, body: AllureJobRequest):
+    if body.app_slug != slug:
+        raise HTTPException(status_code=400, detail="app_slug mismatch")
+    info = _contract_info(slug)
+    if not info.exists:
+        raise HTTPException(status_code=404, detail="Contract not found — extract contract first")
+    try:
+        return job_runner.start_job("allure", body.model_dump())
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

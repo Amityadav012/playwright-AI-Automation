@@ -16,7 +16,7 @@ from generators.testcase_generator import generate_testcases_for_plan
 from lib.contract import load_contract
 from lib.paths import app_output_dir, contracts_dir, ensure_app_dirs
 from lib.artifacts import spec_rel
-from lib.playwright_run import run_spec as run_playwright_spec
+from lib.playwright_run import run_allure_suite, run_spec as run_playwright_spec
 from lib.workspace import ensure_workspace, get_plan, resolve_contract_path
 from pipeline import run_pipeline
 
@@ -84,6 +84,10 @@ def _run_scrape(request: dict[str, Any]) -> dict[str, Any]:
         steps=["scrape"],
         scrape_url=request["url"],
         max_pages=request.get("max_pages", 20),
+        headed=bool(request.get("headed", False)),
+        seed_paths=request.get("seed_paths"),
+        interact=request.get("interact", True),
+        merge=request.get("merge", True),
     )
     ensure_workspace(app_slug, contract_path=contract_path)
     return {
@@ -127,6 +131,13 @@ def _run_testcase(request: dict[str, Any]) -> dict[str, Any]:
         "flows": [plan_id],
         "artifact_path": str(paths[0].relative_to(app_output_dir(app_slug))) if paths else None,
     }
+
+
+def _run_allure(request: dict[str, Any]) -> dict[str, Any]:
+    app_slug = request["app_slug"]
+    contract_path = _contract_path_for_app(app_slug)
+    contract = load_contract(contract_path)
+    return run_allure_suite(app_slug, base_url=contract.base_url)
 
 
 def _run_playwright(request: dict[str, Any]) -> dict[str, Any]:
@@ -199,6 +210,10 @@ def _run_pipeline(request: dict[str, Any]) -> dict[str, Any]:
         modules=request.get("modules"),
         scrape_url=request.get("url"),
         max_pages=request.get("max_pages", 20),
+        headed=bool(request.get("headed", False)),
+        seed_paths=request.get("seed_paths"),
+        interact=request.get("interact", True),
+        merge=request.get("merge", True),
     )
     if "scrape" in steps:
         ensure_workspace(app_slug, contract_path=contract_path)
@@ -212,6 +227,7 @@ def _execute_job(job_type: JobType, request: dict[str, Any]) -> dict[str, Any]:
         "testcase": _run_testcase,
         "spec": _run_spec,
         "run": _run_playwright,
+        "allure": _run_allure,
         "pipeline": _run_pipeline,
     }
     return handlers[job_type](request)
@@ -313,6 +329,7 @@ def job_to_response(data: dict) -> JobResponse:
             exit_code=result_data.get("exit_code"),
             passed=result_data.get("passed"),
             report_path=result_data.get("report_path"),
+            allure_results_path=result_data.get("allure_results_path"),
         )
     return JobResponse(
         id=data["id"],

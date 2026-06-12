@@ -2,7 +2,7 @@
 Website Scraper with LLM Intelligence
 --------------------------------------
 Crawls a website, extracts all pages and clickable elements with XPaths,
-and uses OpenAI to intelligently decide what pages are worth crawling.
+and uses Claude Code CLI to intelligently decide what pages are worth crawling.
 Output is a JSON file consumable by the test generator.
 """
 
@@ -11,18 +11,36 @@ import re
 import json
 import time
 import logging
+import subprocess
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import urljoin, urlparse
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from typing import Optional
 
-CONTRACT_VERSION = "1.1.0"
+CONTRACT_VERSION = "1.2.0"
 
 from bs4 import BeautifulSoup
 from lxml import etree
-from openai import OpenAI
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright, Page, Browser
+
+from lib.contract_merge import merge_contracts, render_diff_markdown
+from lib.crawl_rules import looks_like_login_redirect, select_crawl_urls, url_template
+from lib.llm import parse_json_response
+from lib.playwright_run import resolve_scraper_headless
+from lib.scraper_auth import authenticate_at_url, authenticate_page, is_login_gate, is_login_path
+from lib.scraper_credentials import (
+    button_probe_limit,
+    default_login_url,
+    resolve_auth_url,
+    has_auth_credentials,
+    load_scraper_credentials,
+    merge_legacy_cli_credentials,
+    navigation_timeout_ms,
+)
+from lib.scraper_interaction import interaction_pass
+from lib.scraper_navigation import classify_link, discover_button_routes, extract_live_navigation
 
 load_dotenv()
 
@@ -33,6 +51,7 @@ STATIC_ASSET_EXTENSIONS = (
     ".pdf", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg",
     ".zip", ".css", ".js", ".woff", ".woff2", ".ico", ".mp4",
 )
+
 COMMON_STATIC_PATHS = (
     "/sitemap",
     "/privacypolicy",
@@ -46,7 +65,6 @@ COMMON_STATIC_PATHS = (
     "/faq",
     "/faqs",
 )
-
 # ─────────────────────────────────────────────
 # Data Models
 # ─────────────────────────────────────────────
@@ -57,7 +75,7 @@ class Link:
     raw_href: str                   # value from DOM before resolution
     text: str
     tag: str                        # a | button | area
-    category: str                   # internal_path | internal_hash | external | navigation_button | mailto | tel
+    category: str                   # internal_path | internal_hash | external | navigation_button | spa_route | mailto | tel
     crawlable: bool                 # safe to enqueue for multi-page crawl
     opens_new_tab: bool = False
     aria_label: Optional[str] = None
@@ -89,6 +107,9 @@ class ScrapedPage:
     page_type: str = "unknown"      # LLM-assigned: login | dashboard | list | detail | form | nav
     test_priority: str = "medium"   # LLM-assigned: high | medium | low
     llm_notes: str = ""             # LLM summary of what this page does
+    auth_context: str = "anonymous"  # anonymous | authenticated
+    scrape_status: str = "ok"       # ok | login_redirect
+    ready_state: str = "stable"       # stable | timeout | n/a
 
 
 @dataclass
@@ -113,98 +134,24 @@ def _is_static_asset(url: str) -> bool:
 
 def _classify_link(raw_href: str, resolved_href: str, base_domain: str) -> tuple[str, bool]:
     """Return (category, crawlable)."""
-    if not raw_href and not resolved_href:
-        return "navigation_button", False
-
-    href = raw_href or resolved_href
-    lower = href.lower().strip()
-
-    if lower.startswith("mailto:"):
-        return "mailto", False
-    if lower.startswith("tel:"):
-        return "tel", False
-    if lower.startswith("javascript:") or lower in ("#", ""):
-        return "internal_hash", False
-
-    parsed = urlparse(resolved_href or href)
-    if parsed.netloc and parsed.netloc != base_domain:
-        return "external", False
-
-    if parsed.fragment and (not parsed.path or parsed.path in ("", "/")):
-        return "internal_hash", False
-    if "#" in href and not parsed.path:
-        return "internal_hash", False
-
-    if _is_static_asset(resolved_href):
-        return "internal_path", False
-
-    return "internal_path", True
+    return classify_link(raw_href, resolved_href, base_domain, _is_static_asset)
 
 
-def extract_links_from_page(page: Page, page_url: str, base_domain: str) -> list[Link]:
-    """Extract anchors and navigation buttons from the live DOM."""
-    try:
-        page.keyboard.press("Escape")
-    except Exception:
-        pass
+def _link_from_dict(item: dict) -> Link:
+    return Link(
+        href=item.get("href") or "",
+        raw_href=item.get("raw_href") or "",
+        text=item.get("text") or "",
+        tag=item.get("tag") or "a",
+        category=item.get("category") or "navigation_button",
+        crawlable=bool(item.get("crawlable")),
+        opens_new_tab=bool(item.get("opens_new_tab")),
+        aria_label=item.get("aria_label"),
+        region=item.get("region") or "unknown",
+    )
 
-    try:
-        raw_items = page.evaluate(
-            """() => {
-            const items = [];
-            const seen = new Set();
 
-            const push = (item) => {
-                const key = [item.tag, item.raw_href || '', item.text || '', item.aria_label || ''].join('|');
-                if (seen.has(key)) return;
-                seen.add(key);
-                items.push(item);
-            };
-
-            const regionFor = (el) => {
-                const nav = el.closest('header, footer, nav, [role="navigation"]');
-                if (!nav) return 'content';
-                const tag = nav.tagName.toLowerCase();
-                return tag === 'nav' ? 'nav' : tag;
-            };
-
-            document.querySelectorAll('a[href], area[href], [role="link"][href]').forEach((el) => {
-                const raw = el.getAttribute('href') || '';
-                push({
-                    tag: el.tagName.toLowerCase(),
-                    raw_href: raw,
-                    resolved_href: el.href || raw,
-                    text: (el.innerText || '').trim().slice(0, 120),
-                    aria_label: el.getAttribute('aria-label'),
-                    opens_new_tab: el.target === '_blank' || el.getAttribute('rel')?.includes('noopener'),
-                    region: regionFor(el),
-                });
-            });
-
-            document.querySelectorAll(
-                'button.footer-link, button.link-item, header button, nav button, [role="navigation"] button'
-            ).forEach((el) => {
-                const raw = el.getAttribute('href') || el.dataset?.href || '';
-                const text = (el.innerText || el.getAttribute('aria-label') || '').trim().slice(0, 120);
-                if (!text && !raw) return;
-                push({
-                    tag: 'button',
-                    raw_href: raw,
-                    resolved_href: raw ? new URL(raw, window.location.href).href : '',
-                    text,
-                    aria_label: el.getAttribute('aria-label'),
-                    opens_new_tab: false,
-                    region: regionFor(el),
-                });
-            });
-
-            return items;
-        }"""
-        )
-    except Exception as e:
-        log.warning(f"Live DOM link extraction failed for {page_url}: {e}")
-        return []
-
+def _raw_items_to_links(raw_items: list[dict], page_url: str, base_domain: str) -> list[Link]:
     links: list[Link] = []
     for item in raw_items:
         raw_href = (item.get("raw_href") or "").strip()
@@ -217,18 +164,28 @@ def extract_links_from_page(page: Page, page_url: str, base_domain: str) -> list
         else:
             category, crawlable = _classify_link(raw_href, resolved, base_domain)
 
-        links.append(Link(
-            href=resolved or raw_href,
-            raw_href=raw_href,
-            text=item.get("text", ""),
-            tag=item.get("tag", "a"),
-            category=category,
-            crawlable=crawlable,
-            opens_new_tab=bool(item.get("opens_new_tab")),
-            aria_label=item.get("aria_label"),
-            region=item.get("region") or "unknown",
-        ))
+        links.append(
+            Link(
+                href=resolved or raw_href,
+                raw_href=raw_href,
+                text=item.get("text", ""),
+                tag=item.get("tag", "a"),
+                category=category,
+                crawlable=crawlable,
+                opens_new_tab=bool(item.get("opens_new_tab")),
+                aria_label=item.get("aria_label"),
+                region=item.get("region") or "unknown",
+            )
+        )
     return links
+
+
+def extract_links_from_page(page: Page, page_url: str, base_domain: str) -> list[Link]:
+    """Extract anchors and navigation buttons from the live DOM."""
+    raw_items, _probe_candidates = extract_live_navigation(page)
+    if not raw_items:
+        log.warning("Live DOM link extraction returned no items for %s", page_url)
+    return _raw_items_to_links(raw_items, page_url, base_domain)
 
 
 def merge_unique_links(existing: list[Link], new_links: list[Link]) -> list[Link]:
@@ -526,7 +483,11 @@ def build_unified_elements(
             else (f"//{link.tag}[contains(text(),'{label[:30]}')]" if label else f"//{link.tag}")
         )
         role = "link" if link.tag == "a" else "button"
-        category = "navigation" if link.category in ("internal_path", "navigation_button") else link.category
+        category = (
+            "navigation"
+            if link.category in ("internal_path", "navigation_button", "spa_route")
+            else link.category
+        )
         stored_href = _normalize_href_for_storage(link.href, link.raw_href)
         target_path = _target_path_from_href(
             stored_href,
@@ -842,8 +803,15 @@ def extract_clickables(soup: BeautifulSoup, base_url: str) -> tuple[list[Clickab
 
 class LLMAnalyzer:
     def __init__(self):
-        self.client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-        self.model = "gpt-4o-mini"  # fast and cheap for analysis
+        self.model = "claude-haiku-4-5-20251001"  # fast and cheap for analysis
+
+    def _run(self, prompt: str) -> str:
+        result = subprocess.run(
+            ["claude", "-p", "--output-format", "json", "--model", self.model],
+            input=prompt,
+            capture_output=True, text=True, check=True,
+        )
+        return json.loads(result.stdout)["result"].strip()
 
     def decide_which_urls_to_crawl(self, discovered_urls: list[str], base_url: str, already_crawled: list[str]) -> list[str]:
         """Ask LLM to pick the most important URLs to crawl next."""
@@ -866,12 +834,7 @@ Return ONLY a JSON array of selected URLs, no explanation.
 Maximum 15 URLs.
 """
         try:
-            resp = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0,
-            )
-            content = resp.choices[0].message.content.strip()
+            content = self._run(prompt)
             content = content.replace("```json", "").replace("```", "").strip()
             return json.loads(content)
         except Exception as e:
@@ -899,12 +862,7 @@ Respond ONLY with a JSON object (no markdown):
 }}
 """
         try:
-            resp = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0,
-            )
-            content = resp.choices[0].message.content.strip()
+            content = self._run(prompt)
             content = content.replace("```json", "").replace("```", "").strip()
             return json.loads(content)
         except Exception as e:
@@ -980,17 +938,108 @@ Rules:
 - Include every element_id, form_id, and form_id.field_id listed above.
 """
         try:
-            resp = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0,
-            )
-            content = resp.choices[0].message.content.strip()
+            content = self._run(prompt)
             content = content.replace("```json", "").replace("```", "").strip()
             return json.loads(content)
         except Exception as e:
             log.warning(f"LLM element description failed for {url}: {e}")
             return {"elements": {}, "forms": {}, "fields": {}}
+
+    def plan_auth_steps(
+        self,
+        *,
+        url: str,
+        title: str,
+        page_text: str,
+        forms: list[dict],
+        elements: list[dict],
+        available_keys: list[str],
+    ) -> dict:
+        """Plan login steps mapping env credential keys to form fields (no secret values)."""
+        if not available_keys:
+            return {"flow_type": "unknown", "steps": [], "success_hint": ""}
+
+        form_summary = [
+            {
+                "form_id": form.get("form_id"),
+                "method": form.get("method"),
+                "fields": [
+                    {
+                        "field_id": field.get("field_id"),
+                        "name": field.get("name"),
+                        "type": field.get("type"),
+                        "label": field.get("label"),
+                        "placeholder": field.get("placeholder"),
+                        "selectors": field.get("selectors"),
+                    }
+                    for field in form.get("fields", [])[:12]
+                ],
+            }
+            for form in forms[:4]
+        ]
+        button_summary = [
+            {
+                "element_id": el.get("element_id"),
+                "role": el.get("role"),
+                "label": el.get("label"),
+                "selectors": el.get("selectors"),
+            }
+            for el in elements
+            if el.get("role") in ("button", "link")
+            or (el.get("label") or "").lower()
+            in ("login", "sign in", "send otp", "verify", "submit", "continue")
+        ][:20]
+
+        prompt = f"""
+You are planning a Playwright login flow for QA web scraping.
+
+Page URL: {url}
+Page title: {title}
+Page text (truncated): {page_text[:800]}
+
+Forms:
+{json.dumps(form_summary, indent=2)}
+
+Buttons/links:
+{json.dumps(button_summary, indent=2)}
+
+Available credential keys (values are NOT provided — reference keys only):
+{json.dumps(available_keys)}
+
+Return ONLY JSON (no markdown):
+{{
+  "flow_type": "password | otp | mixed | unknown",
+  "steps": [
+    {{"action": "fill", "selector": "<css selector>", "credential_key": "<one of available keys>"}},
+    {{"action": "click", "selector": "<css selector>", "label_hint": "<button label>"}},
+    {{"wait_ms": 1500}}
+  ],
+  "success_hint": "url_path_not_login_or_dashboard"
+}}
+
+Credential key meanings (values are never provided):
+- QA_USERNAME: username, email, or user identifier field
+- QA_PASSWORD: password field
+- QA_TEST_MOBILE: phone/mobile number field (often before an OTP step)
+- QA_TEST_OTP: one-time password, verification code, or PIN field
+
+Rules:
+- Infer the login flow from the forms and buttons on THIS page only.
+- Use only credential_key values from the available keys list.
+- Prefer stable CSS selectors from field selectors or [name=...], [id=...], [data-testid=...].
+- Multi-step flows: fill fields in UI order; insert click steps for intermediate actions (e.g. request code) and wait_ms when a field appears after an action.
+- If this is not a login page, return "steps": [].
+- Maximum 8 steps.
+"""
+        try:
+            content = self._run(prompt)
+            plan = parse_json_response(content)
+            if not isinstance(plan.get("steps"), list):
+                plan["steps"] = []
+            return plan
+        except Exception as e:
+            log.warning(f"LLM auth planning failed for {url}: {e}")
+            return {"flow_type": "unknown", "steps": [], "success_hint": ""}
 
 
 # ─────────────────────────────────────────────
@@ -1010,23 +1059,45 @@ class WebScraper:
         max_pages: int = 30,
         delay: float = 0.5,
         wait_until: str = "load",
-        probe_common_paths: bool = True,
+        credentials: Optional[dict[str, str]] = None,
+        headed: bool = False,
+        seed_paths: Optional[list[str]] = None,
+        interact: bool = True,
+        probe_common_paths: bool = False,
+        ready_timeout: float = 12.0,
+        max_expanders: int = 8,
     ):
         self.base_url = base_url.rstrip("/")
         self.base_domain = urlparse(base_url).netloc
         self.wait_until = wait_until
-        self.probe_common_paths = probe_common_paths
-        self.login_url = login_url
-        self.username = username
-        self.password = password
         self.username_selector = username_selector
         self.password_selector = password_selector
         self.submit_selector = submit_selector
         self.max_pages = max_pages
         self.delay = delay
+        self.seed_paths = list(seed_paths or [])
+        self.interact = interact
+        self.probe_common_paths = probe_common_paths
+        self.ready_timeout = ready_timeout
+        self.max_expanders = max_expanders
+        self.credentials = merge_legacy_cli_credentials(
+            credentials if credentials is not None else load_scraper_credentials(),
+            login_url=login_url,
+            username=username,
+            password=password,
+        )
+        self.login_url = login_url or default_login_url(self.credentials, self.base_url)
+        self.username = username or self.credentials.get("QA_USERNAME")
+        self.password = password or self.credentials.get("QA_PASSWORD")
+        self.authenticated = False
+        self._auth_attempted = False
+        self.headless = resolve_scraper_headless(headed)
         self.llm = LLMAnalyzer()
-        self.visited: set[str] = set()
+        self.visited: set[tuple[str, str]] = set()
         self.scraped_page_urls: set[str] = set()
+        self.seen_templates: set[str] = set()
+        self.pending_protected: set[str] = set()
+        self.pages_attempted = 0
         self.sitemap = SiteMap(base_url=base_url, total_pages=0, wait_until=wait_until)
 
     def _is_same_domain(self, url: str) -> bool:
@@ -1036,36 +1107,182 @@ class WebScraper:
         parsed = urlparse(url)
         return parsed._replace(fragment="", query="").geturl().rstrip("/")
 
-    def _get_page_html(self, page: Page, url: str) -> tuple[Optional[str], Optional[str]]:
-        """Load a page and return (html, final_url_after_redirects)."""
+    def _wait_for_page_ready(self, page: Page) -> dict:
+        """SPA readiness: network idle, then stable interactive-element count."""
         try:
-            page.goto(url, wait_until=self.wait_until, timeout=30000)
-            time.sleep(self.delay)
-            return page.content(), self._normalise_url(page.url)
+            page.wait_for_load_state("networkidle", timeout=10_000)
+        except Exception:
+            pass
+
+        count_js = (
+            "() => document.querySelectorAll("
+            "'a[href], button, input, select, textarea, [role=\"button\"], [role=\"link\"]'"
+            ").length"
+        )
+        last = -1
+        stable_polls = 0
+        state = "timeout"
+        deadline = time.monotonic() + self.ready_timeout
+        while time.monotonic() < deadline:
+            try:
+                count = page.evaluate(count_js)
+            except Exception:
+                count = -1
+            if count >= 0 and count == last:
+                stable_polls += 1
+                if stable_polls >= 2:
+                    state = "stable"
+                    break
+            else:
+                stable_polls = 0
+            last = count
+            time.sleep(0.3)
+        return {"ready_state": state, "interactive_count": max(last, 0)}
+
+    def _get_page_html(
+        self, page: Page, url: str
+    ) -> tuple[Optional[str], Optional[str], dict]:
+        """Load a page and return (html, final_url_after_redirects, ready_meta)."""
+        try:
+            page.goto(url, wait_until=self.wait_until, timeout=navigation_timeout_ms())
         except Exception as e:
             log.warning(f"Failed to load {url} with wait_until={self.wait_until}: {e}")
             if self.wait_until != "domcontentloaded":
                 try:
-                    page.goto(url, wait_until="domcontentloaded", timeout=15000)
-                    time.sleep(self.delay)
-                    return page.content(), self._normalise_url(page.url)
+                    page.goto(
+                        url,
+                        wait_until="domcontentloaded",
+                        timeout=navigation_timeout_ms(),
+                    )
                 except Exception as fallback_error:
                     log.warning(f"Fallback load failed for {url}: {fallback_error}")
-            return None, None
+                    return None, None, {}
+            else:
+                return None, None, {}
+        ready_meta = self._wait_for_page_ready(page)
+        time.sleep(self.delay)
+        return page.content(), self._normalise_url(page.url), ready_meta
 
-    def _login(self, page: Page):
-        if not self.login_url:
-            return
-        log.info(f"Logging in at {self.login_url}")
-        try:
-            page.goto(self.login_url, wait_until="domcontentloaded", timeout=15000)
-            page.fill(self.username_selector, self.username)
-            page.fill(self.password_selector, self.password)
-            page.click(self.submit_selector)
-            page.wait_for_load_state("domcontentloaded", timeout=10000)
-            log.info("Login successful")
-        except Exception as e:
-            log.warning(f"Login failed: {e}")
+    def _seed_urls(self) -> list[str]:
+        urls: list[str] = []
+        for path in self.seed_paths:
+            candidate = (
+                path if path.startswith("http") else urljoin(self.base_url + "/", path.lstrip("/"))
+            )
+            normalised = self._normalise_url(candidate)
+            if self._is_same_domain(normalised):
+                urls.append(normalised)
+        return urls
+
+    def _probe_common_paths_list(self) -> list[str]:
+        if not self.probe_common_paths:
+            return []
+        return [
+            self._normalise_url(urljoin(self.base_url + "/", path.lstrip("/")))
+            for path in COMMON_STATIC_PATHS
+        ]
+
+    def _extract_scraped_page(
+        self,
+        page: Page,
+        page_url: str,
+        html: str,
+        depth: int,
+        *,
+        allow_auth: bool = False,
+        auth_context: str = "anonymous",
+        scrape_status: str = "ok",
+        ready_state: str = "stable",
+    ) -> ScrapedPage:
+        soup = BeautifulSoup(html, "html.parser")
+        title = soup.title.string.strip() if soup.title else page_url
+        page_text = soup.get_text(separator=" ", strip=True)
+
+        page_links = extract_links_from_page(page, page_url, self.base_domain)
+        self.sitemap.all_links = merge_unique_links(self.sitemap.all_links, page_links)
+        clickables, forms = extract_clickables(soup, page_url)
+        if self.interact:
+            extra = interaction_pass(
+                page,
+                normalise_url=self._normalise_url,
+                wait_for_page_ready=self._wait_for_page_ready,
+                max_expanders=self.max_expanders,
+            )
+            seen_xpaths = {c.xpath for c in clickables}
+            for clickable in extra:
+                if clickable.xpath not in seen_xpaths:
+                    clickables.append(clickable)
+                    seen_xpaths.add(clickable.xpath)
+        analysis = self.llm.analyze_page(page_url, title, page_text, clickables)
+
+        if analysis.get("is_protected"):
+            for c in clickables:
+                if any(w in c.text.lower() for w in ["login", "sign in", "logout", "account", "profile"]):
+                    c.is_auth_required = True
+
+        elements = build_unified_elements(page_links, clickables, self.base_url)
+        contract_forms = build_contract_forms(forms, self.base_url)
+
+        if (
+            allow_auth
+            and not self.authenticated
+            and has_auth_credentials(self.credentials)
+            and is_login_gate(page_url, analysis.get("page_type", "unknown"), contract_forms)
+        ):
+            auth_url = resolve_auth_url(self.credentials, self.base_url, page_url)
+            if default_login_url(self.credentials, self.base_url):
+                auth_ok = authenticate_at_url(self, page, auth_url)
+            else:
+                auth_ok = authenticate_page(
+                    self,
+                    page,
+                    url=page_url,
+                    title=title,
+                    page_text=page_text,
+                    analysis=analysis,
+                    forms=contract_forms,
+                    elements=elements,
+                )
+            if auth_ok:
+                html, refreshed_url, ready_meta = self._get_page_html(page, page_url)
+                if html:
+                    return self._extract_scraped_page(
+                        page,
+                        refreshed_url or page_url,
+                        html,
+                        depth,
+                        allow_auth=False,
+                        auth_context=auth_context,
+                        ready_state=ready_meta.get("ready_state", "unknown"),
+                    )
+
+        descriptions = self.llm.describe_interactive_elements(
+            url=page_url,
+            title=title,
+            page_type=analysis.get("page_type", "unknown"),
+            page_notes=analysis.get("notes", ""),
+            elements=elements,
+            forms=contract_forms,
+        )
+        apply_descriptions(elements, contract_forms, descriptions)
+
+        is_protected = auth_context == "authenticated" or analysis.get("is_protected", False)
+        return ScrapedPage(
+            url=page_url,
+            title=title,
+            is_protected=is_protected,
+            depth=depth,
+            clickables=clickables,
+            links=page_links,
+            elements=elements,
+            forms=contract_forms,
+            page_type=analysis.get("page_type", "unknown"),
+            test_priority=analysis.get("test_priority", "medium"),
+            llm_notes=analysis.get("notes", ""),
+            auth_context=auth_context,
+            scrape_status=scrape_status,
+            ready_state=ready_state,
+        )
 
     def _discover_crawl_urls(
         self,
@@ -1083,150 +1300,170 @@ class WebScraper:
         for a in soup.find_all("a", href=True):
             href = urljoin(current_url, a["href"])
             normalised = self._normalise_url(href)
-            if (
-                self._is_same_domain(normalised)
-                and not _is_static_asset(normalised)
-            ):
+            if self._is_same_domain(normalised) and classify_link(
+                a["href"], href, self.base_domain, _is_static_asset
+            )[1]:
                 crawl_urls.add(normalised)
 
         return sorted(crawl_urls)
 
-    def _probe_common_paths(self) -> list[str]:
-        """Probe well-known static routes that SPAs often omit from anchor tags."""
-        if not self.probe_common_paths:
+    def _discover_button_routes(self, page: Page, page_url: str) -> list[Link]:
+        """Probe no-href buttons; record SPA routes discovered via URL change."""
+        if is_login_path(page_url) and not self.authenticated:
             return []
 
-        discovered: list[str] = []
-        for path in COMMON_STATIC_PATHS:
-            candidate = self._normalise_url(urljoin(self.base_url + "/", path.lstrip("/")))
-            if candidate in self.visited:
+        limit = button_probe_limit()
+        if limit <= 0:
+            return []
+
+        route_dicts = discover_button_routes(
+            page,
+            page_url,
+            base_domain=self.base_domain,
+            normalise_url=self._normalise_url,
+            is_static_asset=_is_static_asset,
+            delay=self.delay,
+            probe_limit=limit,
+            navigation_timeout_ms=navigation_timeout_ms(),
+        )
+        return [_link_from_dict(item) for item in route_dicts]
+
+    def _visited_urls(self) -> set[str]:
+        return {url for _ctx, url in self.visited}
+
+    def _crawl(self, page: Page, initial_queue: list[str], auth_context: str) -> None:
+        queue: list[str] = []
+        for url in initial_queue:
+            normalised = self._normalise_url(url)
+            if normalised not in queue:
+                queue.append(normalised)
+
+        while queue and self.pages_attempted < self.max_pages:
+            url = queue.pop(0)
+            visit_key = (auth_context, url)
+            if visit_key in self.visited:
                 continue
-            discovered.append(candidate)
-        return discovered
+            self.visited.add(visit_key)
+            self.pages_attempted += 1
 
-    def _select_urls_to_crawl(
-        self,
-        candidates: list[str],
-        already_crawled: list[str],
-    ) -> list[str]:
-        unvisited = [u for u in candidates if u not in self.visited]
-        if not unvisited:
-            return []
+            log.info(
+                f"[{self.pages_attempted}/{self.max_pages}] ({auth_context}) Scraping: {url}"
+            )
+            html, final_url, ready_meta = self._get_page_html(page, url)
+            if not html:
+                continue
 
-        selected = self.llm.decide_which_urls_to_crawl(unvisited, self.base_url, already_crawled)
-        if selected:
-            unvisited_set = set(unvisited)
-            normalised = []
+            page_url = final_url or url
+            if auth_context == "anonymous" and looks_like_login_redirect(url, page_url):
+                log.info(f"  Redirected to login — marked protected: {url}")
+                self.pending_protected.add(url)
+                continue
+
+            if page_url in self.scraped_page_urls:
+                log.info(f"  Skipping duplicate resolved page: {page_url}")
+                continue
+            self.scraped_page_urls.add(page_url)
+            self.seen_templates.add(url_template(page_url))
+
+            scraped = self._extract_scraped_page(
+                page,
+                page_url,
+                html,
+                depth=self.pages_attempted,
+                allow_auth=(auth_context == "authenticated"),
+                auth_context=auth_context,
+                ready_state=ready_meta.get("ready_state", "unknown"),
+            )
+            self.sitemap.pages.append(scraped)
+
+            if scraped.is_protected:
+                self.sitemap.auth_urls.append(page_url)
+            else:
+                self.sitemap.public_urls.append(page_url)
+
+            button_links = self._discover_button_routes(page, page_url)
+            if button_links:
+                scraped.links = merge_unique_links(scraped.links, button_links)
+                self.sitemap.all_links = merge_unique_links(self.sitemap.all_links, button_links)
+                scraped.elements = build_unified_elements(
+                    scraped.links, scraped.clickables, self.base_url
+                )
+
+            soup = BeautifulSoup(html, "html.parser")
+            crawl_candidates = self._discover_crawl_urls(soup, page_url, scraped.links)
+            visited_urls = self._visited_urls() | set(queue)
+            selected = select_crawl_urls(crawl_candidates, self.seen_templates, visited_urls)
             for candidate in selected:
-                url = self._normalise_url(candidate)
-                if url in unvisited_set:
-                    normalised.append(url)
-            if normalised:
-                return normalised
+                key = (auth_context, candidate)
+                if key not in self.visited and candidate not in queue:
+                    queue.append(candidate)
 
-        # LLM returned nothing — crawl all internal path candidates (bounded).
-        log.info(f"LLM returned no crawl URLs; enqueueing {min(len(unvisited), 15)} path link(s) directly")
-        return unvisited[:15]
+            href_crawlable = sum(
+                1
+                for link in scraped.links
+                if link.crawlable and link.category in ("internal_path", "spa_route")
+            )
+            button_routes = sum(1 for link in scraped.links if link.category == "spa_route")
+            log.info(
+                f"  Found {len(scraped.elements)} element(s), {len(scraped.forms)} form(s), "
+                f"ready={scraped.ready_state}, "
+                f"({href_crawlable} crawlable path(s), {button_routes} button route(s)), "
+                f"enqueued {len(selected)} new URL(s)"
+            )
 
     def scrape(self) -> SiteMap:
         with sync_playwright() as pw:
-            browser: Browser = pw.chromium.launch(headless=True)
+            browser: Browser = pw.chromium.launch(headless=self.headless)
+
             context = browser.new_context()
             page = context.new_page()
+            initial = [self._normalise_url(self.base_url)]
+            initial += self._probe_common_paths_list()
+            initial += self._seed_urls()
+            self._crawl(page, initial, auth_context="anonymous")
+            context.close()
 
-            # Login if credentials provided
-            if self.login_url and self.username and self.password:
-                self._login(page)
-
-            # Start crawl queue with base URL + common static paths (SPA sites often hide these).
-            queue = [self._normalise_url(self.base_url)]
-            for probed in self._probe_common_paths():
-                if probed not in queue:
-                    queue.append(probed)
-
-            while queue and len(self.visited) < self.max_pages:
-                url = queue.pop(0)
-                if url in self.visited:
-                    continue
-                self.visited.add(url)
-
-                log.info(f"[{len(self.visited)}/{self.max_pages}] Scraping: {url}")
-                html, final_url = self._get_page_html(page, url)
-                if not html:
-                    continue
-
-                page_url = final_url or url
-                if page_url in self.scraped_page_urls:
-                    log.info(f"  Skipping duplicate resolved page: {page_url}")
-                    continue
-                self.scraped_page_urls.add(page_url)
-
-                soup = BeautifulSoup(html, "html.parser")
-                title = soup.title.string.strip() if soup.title else page_url
-                page_text = soup.get_text(separator=" ", strip=True)
-
-                # Extract links from live DOM (captures hash anchors + nav buttons).
-                page_links = extract_links_from_page(page, page_url, self.base_domain)
-                self.sitemap.all_links = merge_unique_links(self.sitemap.all_links, page_links)
-
-                # Extract clickables and forms from rendered HTML.
-                clickables, forms = extract_clickables(soup, page_url)
-
-                # LLM: analyse page
-                analysis = self.llm.analyze_page(page_url, title, page_text, clickables)
-
-                # Mark auth-required clickables (heuristic)
-                if analysis.get("is_protected"):
-                    for c in clickables:
-                        if any(w in c.text.lower() for w in ["login", "sign in", "logout", "account", "profile"]):
-                            c.is_auth_required = True
-
-                elements = build_unified_elements(page_links, clickables, self.base_url)
-                contract_forms = build_contract_forms(forms, self.base_url)
-                descriptions = self.llm.describe_interactive_elements(
-                    url=page_url,
-                    title=title,
-                    page_type=analysis.get("page_type", "unknown"),
-                    page_notes=analysis.get("notes", ""),
-                    elements=elements,
-                    forms=contract_forms,
-                )
-                apply_descriptions(elements, contract_forms, descriptions)
-
-                scraped = ScrapedPage(
-                    url=page_url,
-                    title=title,
-                    is_protected=analysis.get("is_protected", False),
-                    depth=len(self.visited),
-                    clickables=clickables,
-                    links=page_links,
-                    elements=elements,
-                    forms=contract_forms,
-                    page_type=analysis.get("page_type", "unknown"),
-                    test_priority=analysis.get("test_priority", "medium"),
-                    llm_notes=analysis.get("notes", ""),
-                )
-                self.sitemap.pages.append(scraped)
-
-                if scraped.is_protected:
-                    self.sitemap.auth_urls.append(page_url)
-                else:
-                    self.sitemap.public_urls.append(page_url)
-
-                crawl_candidates = self._discover_crawl_urls(soup, page_url, page_links)
-                unvisited = [u for u in crawl_candidates if u not in self.visited and u not in queue]
-                if unvisited:
-                    selected = self._select_urls_to_crawl(unvisited, list(self.visited))
-                    for candidate in selected:
-                        if candidate not in self.visited and candidate not in queue:
-                            queue.append(candidate)
-
-                log.info(
-                    f"  Found {len(elements)} element(s), {len(contract_forms)} form(s) "
-                    f"({sum(1 for l in page_links if l.crawlable)} crawlable path(s))"
-                )
+            if has_auth_credentials(self.credentials):
+                login_target = default_login_url(self.credentials, self.base_url)
+                if login_target:
+                    context = browser.new_context()
+                    page = context.new_page()
+                    self.authenticated = False
+                    self._auth_attempted = False
+                    if authenticate_at_url(self, page, login_target):
+                        auth_queue = sorted(self.pending_protected)
+                        landing = self._normalise_url(page.url)
+                        if landing not in auth_queue:
+                            auth_queue.insert(0, landing)
+                        self._crawl(page, auth_queue, auth_context="authenticated")
+                    else:
+                        log.warning("Authentication failed — protected pages recorded as stubs")
+                    context.close()
 
             browser.close()
+
+        auth_visited = {url for ctx, url in self.visited if ctx == "authenticated"}
+        for url in sorted(self.pending_protected):
+            if url in auth_visited or url in self.scraped_page_urls:
+                continue
+            self.sitemap.pages.append(
+                ScrapedPage(
+                    url=url,
+                    title=url,
+                    is_protected=True,
+                    depth=0,
+                    page_type="protected",
+                    test_priority="high",
+                    llm_notes=(
+                        "Redirected to login during anonymous crawl; "
+                        "supply credentials to scrape this page."
+                    ),
+                    auth_context="anonymous",
+                    scrape_status="login_redirect",
+                    ready_state="n/a",
+                )
+            )
+            self.sitemap.auth_urls.append(url)
 
         self.sitemap.total_pages = len(self.sitemap.pages)
         return self.sitemap
@@ -1236,7 +1473,7 @@ class WebScraper:
 # Output Serialiser
 # ─────────────────────────────────────────────
 
-def save_sitemap(sitemap: SiteMap, output_path: str = "site_map.json"):
+def save_sitemap(sitemap: SiteMap, output_path: str = "site_map.json", merge: bool = True):
     """Serialise UI action contract JSON for test generation."""
     base_url = _clean_url(sitemap.base_url)
     app_name = sitemap.pages[0].title if sitemap.pages else urlparse(base_url).netloc
@@ -1266,6 +1503,9 @@ def save_sitemap(sitemap: SiteMap, output_path: str = "site_map.json"):
             "test_priority": p.test_priority,
             "is_protected": p.is_protected,
             "depth": p.depth,
+            "auth_context": p.auth_context,
+            "scrape_status": p.scrape_status,
+            "ready_state": p.ready_state,
             "elements": p.elements,
             "forms": p.forms,
         })
@@ -1287,17 +1527,37 @@ def save_sitemap(sitemap: SiteMap, output_path: str = "site_map.json"):
             "scraped_at": datetime.now(timezone.utc).isoformat(),
             "total_pages": sitemap.total_pages,
             "wait_until": sitemap.wait_until,
+            "deterministic_frontier": True,
         },
         "route_index": route_index,
         "home_navigation": build_home_navigation(home_elements),
         "pages": contract_pages,
     }
 
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    out = Path(output_path)
+    if merge and out.exists():
+        try:
+            previous = json.loads(out.read_text(encoding="utf-8"))
+        except Exception as exc:
+            log.warning("Could not read previous contract for merge: %s", exc)
+            previous = None
+        if previous and previous.get("pages"):
+            data, diff = merge_contracts(previous, data)
+            diff_path = out.with_name(out.stem + "-diff.md")
+            diff_path.write_text(render_diff_markdown(diff), encoding="utf-8")
+            log.info(
+                "Merged with previous contract: +%d page(s), %d stale page(s), "
+                "%d page(s) with element changes — diff at %s",
+                len(diff["pages_added"]),
+                len(diff["pages_stale"]),
+                len(set(diff["elements_added"]) | set(diff["elements_stale"])),
+                diff_path,
+            )
+
+    out.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
     log.info(f"UI action contract saved to {output_path}")
-    return output_path
+    return str(out)
 
 
 # ─────────────────────────────────────────────
@@ -1315,7 +1575,12 @@ def scrape_website(
     submit_selector: str = "button[type='submit']",
     max_pages: int = 30,
     wait_until: str = "load",
-    probe_common_paths: bool = True,
+    credentials: Optional[dict[str, str]] = None,
+    headed: bool = False,
+    seed_paths: Optional[list[str]] = None,
+    interact: bool = True,
+    merge: bool = True,
+    probe_common_paths: bool = False,
 ) -> str:
     """
     Scrape a website and save a JSON sitemap for test generation.
@@ -1330,6 +1595,10 @@ def scrape_website(
         password_selector:  CSS selector for password field
         submit_selector:    CSS selector for submit button
         max_pages:          Max pages to crawl (default 30)
+        seed_paths:         Extra entry-point paths/URLs to enqueue
+        interact:           Run dropdown/menu interaction pass
+        merge:              Union with existing contract and write -diff.md
+        probe_common_paths: Probe well-known static routes (/sitemap, /faq, …)
 
     Returns:
         Path to the saved JSON file
@@ -1344,10 +1613,14 @@ def scrape_website(
         submit_selector=submit_selector,
         max_pages=max_pages,
         wait_until=wait_until,
+        credentials=credentials,
+        headed=headed,
+        seed_paths=seed_paths,
+        interact=interact,
         probe_common_paths=probe_common_paths,
     )
     sitemap = scraper.scrape()
-    return save_sitemap(sitemap, output_path)
+    return save_sitemap(sitemap, output_path, merge=merge)
 
 
 # ─────────────────────────────────────────────
@@ -1371,9 +1644,16 @@ if __name__ == "__main__":
         help="Playwright navigation wait strategy (default: load)",
     )
     parser.add_argument(
-        "--no-probe-common-paths",
+        "--seed-paths",
+        default="",
+        help="Comma-separated extra entry paths to crawl",
+    )
+    parser.add_argument("--no-interact", action="store_true", help="Skip dropdown/menu interaction pass")
+    parser.add_argument("--no-merge", action="store_true", help="Overwrite contract instead of merging")
+    parser.add_argument(
+        "--probe-common-paths",
         action="store_true",
-        help="Skip probing common static routes like /sitemap and /privacypolicy",
+        help="Probe well-known static routes (/sitemap, /faq, …)",
     )
     args = parser.parse_args()
 
@@ -1385,6 +1665,9 @@ if __name__ == "__main__":
         password=args.password,
         max_pages=args.max_pages,
         wait_until=args.wait_until,
-        probe_common_paths=not args.no_probe_common_paths,
+        seed_paths=[s.strip() for s in args.seed_paths.split(",") if s.strip()],
+        interact=not args.no_interact,
+        merge=not args.no_merge,
+        probe_common_paths=args.probe_common_paths,
     )
     print(f"\n✅ Done! Sitemap saved to: {path}")

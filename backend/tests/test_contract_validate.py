@@ -69,6 +69,61 @@ def test_multi_case_normalizes_ids(contract):
     assert out["cases"][0]["nav_links"][0]["element_id"] == "help_link"
 
 
+def test_validate_prefers_home_header_for_assets_click(contract):
+    ref = {"element_id": "assets_btn", "action": "click", "page_id": "assets_section"}
+    fixed, err = validate_element_ref(ref, contract)
+    assert err is None
+    assert fixed["page_id"] == "home"
+    assert fixed["element_id"] == "assets_btn"
+
+
+def test_content_flow_strips_spurious_nav_links(contract):
+    """LLM sometimes copies home_navigation into content cases — validator must not rewrite element_refs."""
+    flow = {
+        "module": "content",
+        "flow_id": "plan-assets",
+        "cases": [{
+            "id": "plan-assets-H1",
+            "title": "Search Pashu on assets page",
+            "nav_links": [{"element_id": "help_link", "label": "Help", "route": "/help"}],
+            "element_refs": [
+                {"element_id": "assets_btn", "action": "click", "page_id": "home"},
+                {"element_id": "search_assets", "action": "fill", "page_id": "assets_section", "value": "Pashu"},
+            ],
+        }],
+    }
+    meta = {"module": "content", "user_intent": "Go to assets page and search for Pashu"}
+    out, warnings = validate_flow(flow, contract, meta)
+    case = out["cases"][0]
+    assert out["module"] == "content"
+    assert not case.get("nav_links")
+    assert any(w for w in warnings if "removed nav_links" in w)
+    ids = {r["element_id"] for r in case["element_refs"]}
+    assert ids == {"assets_btn", "search_assets"}
+    assert case["element_refs"][1].get("action") == "fill"
+
+
+def test_content_flow_drops_home_nav_element_refs(contract):
+    flow = {
+        "module": "content",
+        "flow_id": "plan-bad",
+        "cases": [{
+            "id": "plan-bad-H1",
+            "title": "Assets search",
+            "nav_links": [{"element_id": "help_link"}],
+            "element_refs": [
+                {"element_id": "help_link", "action": "click", "page_id": "home"},
+                {"element_id": "privacy_link", "action": "click", "page_id": "home"},
+            ],
+        }],
+    }
+    meta = {"module": "content", "user_intent": "Go to assets page and search for Pashu"}
+    out, warnings = validate_flow(flow, contract, meta)
+    assert out["cases"][0]["element_refs"] == []
+    assert any("dropped" in w and "home_navigation" in w for w in warnings)
+    assert any("no content element_refs" in w for w in warnings)
+
+
 def test_slice_for_case_includes_home_navigation(contract):
     case = {
         "nav_links": [{"element_id": "help_link"}],

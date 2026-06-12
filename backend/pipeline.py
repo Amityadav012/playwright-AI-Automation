@@ -22,6 +22,7 @@ from generators.testcase_generator import generate_all_testcases
 from lib.contract import DEFAULT_MODULES, load_contract
 from lib.llm import LLMClient
 from lib.paths import PIPELINE_VERSION, app_output_dir, contracts_dir, ensure_app_dirs
+from lib.scraper_credentials import load_scraper_credentials
 from scraper import scrape_website
 
 load_dotenv()
@@ -61,6 +62,17 @@ def write_manifest(
     return out
 
 
+def _workspace_seed_paths(app_slug: str) -> list[str]:
+    """Read per-app seed paths from workspace.json."""
+    try:
+        from lib.workspace import load_workspace
+
+        seeds = load_workspace(app_slug).get("seed_paths") or []
+        return [s for s in seeds if isinstance(s, str) and s.strip()]
+    except Exception:
+        return []
+
+
 def run_pipeline(
     contract_path: str,
     app_slug: str,
@@ -68,16 +80,26 @@ def run_pipeline(
     modules: list[str] | None = None,
     scrape_url: str | None = None,
     max_pages: int = 20,
+    headed: bool = False,
+    seed_paths: list[str] | None = None,
+    interact: bool = True,
+    merge: bool = True,
 ) -> dict:
     modules = modules or list(DEFAULT_MODULES)
     steps_run: list[str] = []
 
     if "scrape" in steps:
-        log.info("Step scrape: crawling %s", scrape_url)
+        seeds = list(seed_paths) if seed_paths else _workspace_seed_paths(app_slug)
+        log.info("Step scrape: crawling %s (seeds: %s)", scrape_url, seeds or "none")
         contract_path = scrape_website(
             base_url=scrape_url,
             output_path=contract_path,
             max_pages=max_pages,
+            credentials=load_scraper_credentials(),
+            headed=headed,
+            seed_paths=seeds,
+            interact=interact,
+            merge=merge,
         )
         steps_run.append("scrape")
 
@@ -106,8 +128,12 @@ def run_pipeline(
     for yaml_path in sorted(testcase_dir.rglob("*.yaml")):
         import yaml
 
-        with yaml_path.open(encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
+        try:
+            with yaml_path.open(encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+        except yaml.YAMLError as e:
+            log.warning("Skipping malformed testcase YAML %s: %s", yaml_path, e)
+            continue
         fid = data.get("flow_id")
         if fid:
             flow_ids.append(fid)
@@ -140,6 +166,13 @@ def main():
     parser.add_argument("--modules", default=",".join(DEFAULT_MODULES))
     parser.add_argument("--url", help="Base URL to scrape (enables scrape step)")
     parser.add_argument("--max-pages", type=int, default=20)
+    parser.add_argument(
+        "--seed-paths",
+        default="",
+        help="Comma-separated extra entry paths (falls back to workspace.json seed_paths)",
+    )
+    parser.add_argument("--no-interact", action="store_true", help="Skip dropdown/menu interaction pass")
+    parser.add_argument("--no-merge", action="store_true", help="Overwrite contract instead of merging")
     args = parser.parse_args()
 
     steps = [s.strip() for s in args.steps.split(",") if s.strip()]
@@ -160,6 +193,9 @@ def main():
         modules=modules,
         scrape_url=args.url,
         max_pages=args.max_pages,
+        seed_paths=[s.strip() for s in args.seed_paths.split(",") if s.strip()],
+        interact=not args.no_interact,
+        merge=not args.no_merge,
     )
 
     print("\nPipeline complete.")
