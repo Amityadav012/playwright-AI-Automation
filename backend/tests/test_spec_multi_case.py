@@ -80,6 +80,21 @@ def test_multi_case_emits_three_tests(contract):
     assert "url.hash === '#faq'" in spec or "hash" in spec
 
 
+def test_spec_includes_allure_annotations(contract):
+    flow = _nav_flow_multi_case()
+    spec = generate_spec(
+        flow,
+        contract,
+        Path("tests/testcases/plan-nav.yaml"),
+        use_llm_spec=False,
+    )
+    assert "import { allure } from 'allure-playwright'" in spec
+    assert "await allure.epic('navigation')" in spec
+    assert "await allure.feature('header_nav')" in spec
+    assert "await allure.story('Help link')" in spec
+    assert "await allure.step(" in spec
+
+
 def test_content_module_does_not_emit_nav_loop(contract):
     """Content module with stray nav_links must not run the home_navigation click loop."""
     flow = _nav_flow_multi_case()

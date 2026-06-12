@@ -5,7 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 JobStatus = Literal["queued", "running", "completed", "failed"]
-JobType = Literal["scrape", "plan", "testcase", "spec", "run", "pipeline"]
+JobType = Literal["scrape", "plan", "testcase", "spec", "run", "allure", "pipeline"]
 
 
 class ScrapeJobRequest(BaseModel):
@@ -38,6 +38,10 @@ class RunSpecJobRequest(BaseModel):
     spec_path: str | None = None
 
 
+class AllureJobRequest(BaseModel):
+    app_slug: str
+
+
 class PipelineJobRequest(BaseModel):
     app_slug: str
     url: str | None = None
@@ -57,6 +61,7 @@ class JobResult(BaseModel):
     exit_code: int | None = None
     passed: bool | None = None
     report_path: str | None = None
+    allure_results_path: str | None = None
 
 
 class JobResponse(BaseModel):
@@ -103,6 +108,19 @@ class FileContentResponse(BaseModel):
 class PlaywrightReportInfoResponse(BaseModel):
     exists: bool
     index_path: str | None = None
+
+
+class AllureReportInfoResponse(BaseModel):
+    exists: bool
+    results_exist: bool = False
+    index_path: str | None = None
+    results_path: str | None = None
+
+
+class GenerateAllureReportResponse(BaseModel):
+    report_path: str
+    results_path: str
+    generated_at: str
 
 
 class AppSummary(BaseModel):

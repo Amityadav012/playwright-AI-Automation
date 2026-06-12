@@ -43,6 +43,8 @@ REPORT_MIME_TYPES = {
 
 PLAYWRIGHT_REPORT_DIR = "playwright-report"
 PLAYWRIGHT_REPORT_INDEX = f"{PLAYWRIGHT_REPORT_DIR}/index.html"
+ALLURE_REPORT_DIR = "allure-report"
+ALLURE_REPORT_INDEX = f"{ALLURE_REPORT_DIR}/index.html"
 
 
 def _safe_path(app_slug: str, rel_path: str = "") -> Path:
@@ -181,18 +183,6 @@ def _report_media_type(path: Path) -> str:
     return REPORT_MIME_TYPES.get(path.suffix.lower(), "application/octet-stream")
 
 
-def _resolve_report_file(app_slug: str, subpath: str = "") -> Path:
-    rel = f"{PLAYWRIGHT_REPORT_DIR}/{subpath}" if subpath else PLAYWRIGHT_REPORT_INDEX
-    target = _safe_path(app_slug, rel)
-    if target.is_dir():
-        target = target / "index.html"
-        if not str(target.resolve()).startswith(str(app_output_dir(app_slug).resolve())):
-            raise HTTPException(status_code=400, detail="Invalid path")
-    if not target.is_file():
-        raise HTTPException(status_code=404, detail="Report file not found")
-    return target
-
-
 def playwright_report_info(app_slug: str) -> dict:
     index = _safe_path(app_slug, PLAYWRIGHT_REPORT_INDEX)
     exists = index.is_file()
@@ -204,9 +194,30 @@ def playwright_report_info(app_slug: str) -> dict:
 
 def serve_playwright_report(app_slug: str, subpath: str = "") -> FileResponse:
     """Serve Playwright HTML report files inline for iframe viewing."""
+    return _serve_static_report(app_slug, PLAYWRIGHT_REPORT_DIR, PLAYWRIGHT_REPORT_INDEX, subpath)
+
+
+def _resolve_static_report_file(app_slug: str, report_dir: str, subpath: str = "") -> Path:
+    rel = f"{report_dir}/{subpath}" if subpath else f"{report_dir}/index.html"
+    target = _safe_path(app_slug, rel)
+    if target.is_dir():
+        target = target / "index.html"
+        if not str(target.resolve()).startswith(str(app_output_dir(app_slug).resolve())):
+            raise HTTPException(status_code=400, detail="Invalid path")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="Report file not found")
+    return target
+
+
+def _serve_static_report(
+    app_slug: str,
+    report_dir: str,
+    default_index: str,
+    subpath: str = "",
+) -> FileResponse:
     if not subpath or subpath.endswith("/"):
         subpath = (subpath.rstrip("/") + "/index.html") if subpath else "index.html"
-    target = _resolve_report_file(app_slug, subpath)
+    target = _resolve_static_report_file(app_slug, report_dir, subpath)
     media_type = _report_media_type(target)
     if media_type == "text/html":
         media_type = "text/html; charset=utf-8"
@@ -215,3 +226,14 @@ def serve_playwright_report(app_slug: str, subpath: str = "") -> FileResponse:
         media_type=media_type,
         headers={"Content-Disposition": "inline"},
     )
+
+
+def allure_report_info(app_slug: str) -> dict:
+    from lib.allure_report import allure_report_info_dict
+
+    return allure_report_info_dict(app_slug)
+
+
+def serve_allure_report(app_slug: str, subpath: str = "") -> FileResponse:
+    """Serve generated Allure HTML report inline for iframe viewing."""
+    return _serve_static_report(app_slug, ALLURE_REPORT_DIR, ALLURE_REPORT_INDEX, subpath)

@@ -4,10 +4,18 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Callable
 
+from lib.allure_report import (
+    ALLURE_REPORT_DIR,
+    ALLURE_REPORT_INDEX,
+    ALLURE_RESULTS_DIR,
+    ensure_allure_config,
+    generate_allure_report,
+)
 from lib.artifacts import spec_rel
 from lib.paths import app_output_dir
 
@@ -96,6 +104,32 @@ def ensure_node_deps(app_root: Path) -> None:
     (app_root / DEPS_MARKER).write_text("ok\n", encoding="utf-8")
 
 
+def _discover_e2e_specs(app_root: Path) -> list[Path]:
+    e2e_root = app_root / "tests" / "scripts" / "e2e"
+    if not e2e_root.is_dir():
+        return []
+    return sorted(e2e_root.rglob("*.e2e.spec.ts"))
+
+
+def _prepare_playwright_app(app_root: Path, base_url: str) -> None:
+    for required in ("package.json", "playwright.config.ts"):
+        if not (app_root / required).exists():
+            raise FileNotFoundError(
+                f"Missing {required} in {app_root} — generate Playwright spec first"
+            )
+    ensure_env_qa(app_root, base_url)
+    if ensure_allure_config(app_root):
+        (app_root / DEPS_MARKER).unlink(missing_ok=True)
+    ensure_node_deps(app_root)
+
+
+def _clear_allure_results(app_root: Path) -> None:
+    results_dir = app_root / ALLURE_RESULTS_DIR
+    if results_dir.exists():
+        shutil.rmtree(results_dir)
+        log.info("Cleared %s", results_dir)
+
+
 def run_spec(
     app_slug: str,
     spec_rel_path: str,
@@ -119,14 +153,7 @@ def run_spec(
     if not spec_path.exists():
         raise FileNotFoundError(f"Spec not found: {spec_path}")
 
-    for required in ("package.json", "playwright.config.ts"):
-        if not (app_root / required).exists():
-            raise FileNotFoundError(
-                f"Missing {required} in {app_root} — generate Playwright spec first"
-            )
-
-    ensure_env_qa(app_root, base_url)
-    ensure_node_deps(app_root)
+    _prepare_playwright_app(app_root, base_url)
 
     cmd = [
         "npx",
@@ -134,7 +161,6 @@ def run_spec(
         "test",
         spec_rel_path,
         "--headed",
-        "--reporter=html,list",
     ]
     exit_code = _run_command(cmd, app_root)
 
@@ -144,6 +170,11 @@ def run_spec(
     if index.exists():
         report_path = str(index.relative_to(app_root))
 
+    allure_results_path = None
+    results_dir = app_root / ALLURE_RESULTS_DIR
+    if results_dir.is_dir() and any(results_dir.rglob("*")):
+        allure_results_path = ALLURE_RESULTS_DIR
+
     return {
         "steps_run": ["run"],
         "plan_id": plan_id,
@@ -151,4 +182,35 @@ def run_spec(
         "exit_code": exit_code,
         "passed": exit_code == 0,
         "report_path": report_path,
+        "allure_results_path": allure_results_path,
+    }
+
+
+def run_allure_suite(app_slug: str, *, base_url: str) -> dict:
+    """Run all E2E specs headless, generate Allure HTML, return download artifact path."""
+    app_root = app_output_dir(app_slug)
+    if not app_root.exists():
+        raise FileNotFoundError(f"App not found: {app_slug}")
+
+    specs = _discover_e2e_specs(app_root)
+    if not specs:
+        raise FileNotFoundError(
+            f"No Playwright specs found under {app_root / 'tests/scripts/e2e'} — generate a spec first"
+        )
+
+    _prepare_playwright_app(app_root, base_url)
+    _clear_allure_results(app_root)
+
+    log.info("Running %d E2E spec(s) headless for Allure report", len(specs))
+    exit_code = _run_command(["npx", "playwright", "test"], app_root)
+
+    generate_allure_report(app_slug)
+
+    return {
+        "steps_run": ["allure"],
+        "exit_code": exit_code,
+        "passed": exit_code == 0,
+        "report_path": ALLURE_REPORT_INDEX,
+        "artifact_path": ALLURE_REPORT_DIR,
+        "allure_results_path": ALLURE_RESULTS_DIR,
     }

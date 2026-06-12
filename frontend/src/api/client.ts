@@ -31,11 +31,12 @@ export interface JobResult {
   exit_code?: number | null;
   passed?: boolean | null;
   report_path?: string | null;
+  allure_results_path?: string | null;
 }
 
 export interface JobResponse {
   id: string;
-  job_type: "scrape" | "plan" | "testcase" | "spec" | "run" | "pipeline";
+  job_type: "scrape" | "plan" | "testcase" | "spec" | "run" | "allure" | "pipeline";
   status: "queued" | "running" | "completed" | "failed";
   created_at: string;
   started_at: string | null;
@@ -114,6 +115,20 @@ export const api = {
     request<{ exists: boolean; index_path: string | null }>(
       `/api/apps/${slug}/playwright-report/info`,
     ),
+  allureReportUrl: (slug: string, subpath = "index.html") =>
+    `${API_BASE}/api/apps/${slug}/allure-report/${subpath}`,
+  allureReportInfo: (slug: string) =>
+    request<{
+      exists: boolean;
+      results_exist: boolean;
+      index_path: string | null;
+      results_path: string | null;
+    }>(`/api/apps/${slug}/allure-report/info`),
+  generateAllureReport: (slug: string) =>
+    request<{ report_path: string; results_path: string; generated_at: string }>(
+      `/api/apps/${slug}/allure-report/generate`,
+      { method: "POST" },
+    ),
   extractContract: (body: {
     app_slug: string;
     url: string;
@@ -139,6 +154,11 @@ export const api = {
     request<JobResponse>(`/api/apps/${slug}/run/spec`, {
       method: "POST",
       body: JSON.stringify({ app_slug: slug, plan_id, spec_path: spec_path ?? null }),
+    }),
+  runAllureSuite: (slug: string) =>
+    request<JobResponse>(`/api/apps/${slug}/run/allure`, {
+      method: "POST",
+      body: JSON.stringify({ app_slug: slug }),
     }),
   getJob: (id: string) => request<JobResponse>(`/api/jobs/${id}`),
   listJobs: () => request<{ jobs: JobResponse[] }>("/api/jobs"),

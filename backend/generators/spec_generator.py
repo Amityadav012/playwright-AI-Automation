@@ -17,14 +17,16 @@ import yaml
 from dotenv import load_dotenv
 
 from lib.assertions import assert_line_from_contract, map_assertions, map_assertions_for_nav_loop
+from generators.test_plan_generator import load_plan_contract_slice
 from lib.contract import Contract, load_contract, page_id_to_pom_name
+from lib.flow_pages import build_execution_slice, canonical_ui_pages, slice_execution_for_case
 from lib.llm import LLMClient
 from lib.artifacts import spec_path as canonical_spec_path
 from lib.artifacts import spec_rel
 from lib.artifacts import testcase_path as canonical_testcase_path
 from lib.paths import ensure_app_dirs
-from lib.prompts import spec_body_prompt, spec_case_prompt
-from lib.workspace import register_spec
+from lib.prompts import build_spec_body_messages, build_spec_case_messages
+from lib.workspace import parse_plan_frontmatter, register_spec
 
 COVERAGE_LLM_THRESHOLD = 0.5
 
@@ -45,6 +47,8 @@ SCAFFOLD_FILES: dict[str, str] = {
   "devDependencies": {
     "@playwright/test": "^1.60.0",
     "@types/node": "^22.0.0",
+    "allure-commandline": "^2.34.0",
+    "allure-playwright": "^3.0.0",
     "dotenv": "^16.4.0",
     "typescript": "^5.6.0"
   }
@@ -96,7 +100,11 @@ export default defineConfig({{
   retries: process.env.CI ? 2 : 0,
   workers: 1,
   timeout: 60_000,
-  reporter: [['list'], ['html', {{ open: 'never' }}]],
+  reporter: [
+    ['list'],
+    ['html', {{ open: 'never' }}],
+    ['allure-playwright', {{ resultsDir: 'allure-results' }}],
+  ],
   use: {{
     ...devices['Desktop Chrome'],
     baseURL: process.env.QA_UI_BASE_URL ?? '{base_url}',
@@ -132,6 +140,78 @@ def _escape_ts_string(value: str) -> str:
 def _test_open_line(case_id: str, title: str) -> str:
     safe_title = _escape_ts_string(title)
     return f"  test('{case_id}: {safe_title}', async ({{ page }}) => {{"
+
+
+def _map_priority_to_severity(priority: str) -> str:
+    p = (priority or "P1").upper()
+    if p == "P0":
+        return "critical"
+    if p == "P2":
+        return "minor"
+    return "normal"
+
+
+def _yaml_source_string(yaml_path: Path) -> str:
+    posix = yaml_path.as_posix()
+    if "tests/" in posix:
+        return posix[posix.index("tests/") :]
+    return yaml_path.name
+
+
+def _emit_allure_metadata(
+    describe_lines: list[str],
+    case: dict,
+    flow: dict,
+    yaml_source: str,
+) -> None:
+    module = flow.get("module", "general")
+    flow_id = flow.get("flow_id", "FLOW-01")
+    flow_name = flow.get("flow_name", "")
+    case_id = case.get("id", "case")
+    title = case.get("title", case_id)
+    priority = case.get("priority", "P1")
+    case_type = case.get("type", "happy_path")
+    test_data_ref = case.get("test_data_ref", "")
+
+    safe_module = _escape_ts_string(str(module))
+    safe_flow_name = _escape_ts_string(str(flow_name))
+    safe_title = _escape_ts_string(str(title))
+    safe_case_id = _escape_ts_string(str(case_id))
+    safe_yaml = _escape_ts_string(yaml_source)
+    safe_flow_id = _escape_ts_string(str(flow_id))
+    safe_type = _escape_ts_string(str(case_type))
+    safe_priority = _escape_ts_string(str(priority))
+    severity = _map_priority_to_severity(str(priority))
+
+    describe_lines.append(
+        f"    await allure.tms('{safe_case_id}', '{safe_yaml}#{safe_case_id}')"
+    )
+    describe_lines.append(f"    await allure.parameter('case_id', '{safe_case_id}')")
+    describe_lines.append(f"    await allure.parameter('flow_id', '{safe_flow_id}')")
+    describe_lines.append(f"    await allure.parameter('module', '{safe_module}')")
+    describe_lines.append(f"    await allure.parameter('type', '{safe_type}')")
+    describe_lines.append(f"    await allure.parameter('priority', '{safe_priority}')")
+    if test_data_ref:
+        safe_tdr = _escape_ts_string(str(test_data_ref))
+        describe_lines.append(f"    await allure.parameter('test_data_ref', '{safe_tdr}')")
+    describe_lines.append(f"    await allure.parameter('yaml_source', '{safe_yaml}')")
+    describe_lines.append(f"    await allure.epic('{safe_module}')")
+    describe_lines.append(f"    await allure.feature('{safe_flow_name}')")
+    describe_lines.append(f"    await allure.story('{safe_title}')")
+    describe_lines.append(f"    await allure.severity('{severity}')")
+    tags = list(case.get("tags") or []) or list(flow.get("tags") or [])
+    for tag in tags:
+        if isinstance(tag, str) and tag.strip():
+            describe_lines.append(f"    await allure.tag('{_escape_ts_string(tag.strip())}')")
+    describe_lines.append("")
+
+
+def _wrap_allure_step(describe_lines: list[str], label: str, inner: list[str]) -> None:
+    safe_label = _escape_ts_string(label)
+    describe_lines.append(f"    await allure.step('{safe_label}', async () => {{")
+    for line in inner:
+        describe_lines.append(f"      {line}")
+    describe_lines.append("    });")
 
 
 def _normalize_llm_case_body(body: str) -> str:
@@ -640,10 +720,14 @@ def _emit_nav_case_body(
         click_expr = _click_expr_for_element(element) or _click_expr_for_nav_element(element, route)
         if not click_expr:
             continue
-        describe_lines.append(f"    await page.goto('{start_path or '/'}')")
-        describe_lines.append(f"    await {click_expr}")
-        describe_lines.append(f"    {_url_assert_for_nav(route, element, norm.get('assert'))}")
-        describe_lines.append("    await expect(page).toHaveTitle(/.+/);")
+        label = (norm.get("label") or route).strip()
+        step_lines = [
+            f"await page.goto('{start_path or '/'}')",
+            f"await {click_expr}",
+            _url_assert_for_nav(route, element, norm.get("assert")),
+            "await expect(page).toHaveTitle(/.+/);",
+        ]
+        _wrap_allure_step(describe_lines, f"Navigate: {label}", step_lines)
 
 
 def _emit_deterministic_case_body(
@@ -673,28 +757,35 @@ def _emit_deterministic_case_body(
         action_expr = _action_expr_for_ref(ref, element)
         if not action_expr:
             continue
-        describe_lines.append(f"    {action_expr}")
-        if ref.get("action", "click") == "click":
+        action = ref.get("action", "click")
+        el_label = (element.get("label") or element.get("element_id") or "element").strip()
+        step_lines = [action_expr.removeprefix("await ").rstrip(";")]
+        if action == "click":
             url_line = _url_assert_for_element_click(element)
             if url_line:
-                describe_lines.append(f"    {url_line}")
-            describe_lines.append("    await expect(page).toHaveTitle(/.+/);")
+                step_lines.append(url_line.removeprefix("await ").rstrip(";"))
+            step_lines.append("await expect(page).toHaveTitle(/.+/);")
+        _wrap_allure_step(describe_lines, f"{action}: {el_label}", step_lines)
         clicks_written += 1
 
     if clicks_written == 0 and nav_links:
-        describe_lines.append("    for (const link of NAV_LINKS) {")
-        describe_lines.append(f"      await page.goto('{start_path or '/'}')")
+        describe_lines.append("    await allure.step('Navigate all header links', async () => {")
+        describe_lines.append("      for (const link of NAV_LINKS) {")
+        describe_lines.append(f"        await page.goto('{start_path or '/'}')")
         describe_lines.append(
-            "      await page.getByRole('link', { name: link.label, exact: true }).first().click();"
+            "        await page.getByRole('link', { name: link.label, exact: true }).first().click();"
         )
-        for line in map_assertions_for_nav_loop(
-            case.get("assertions", ["page_loads"])
-        ):
-            describe_lines.append(f"      {line}")
-        describe_lines.append("    }")
+        for line in map_assertions_for_nav_loop(case.get("assertions", ["page_loads"])):
+            inner = line.removeprefix("await ").rstrip(";")
+            describe_lines.append(f"        await {inner}")
+        describe_lines.append("      }")
+        describe_lines.append("    });")
     elif clicks_written == 0:
-        for line in map_assertions(case.get("assertions", ["page_loads"])):
-            describe_lines.append(f"    {line}")
+        assert_lines = [
+            line.removeprefix("await ").rstrip(";")
+            for line in map_assertions(case.get("assertions", ["page_loads"]))
+        ]
+        _wrap_allure_step(describe_lines, "Page assertions", assert_lines)
 
     return clicks_written
 
@@ -890,6 +981,7 @@ def generate_spec(
     llm: LLMClient | None = None,
     use_llm_body: bool = False,
     use_llm_spec: bool = False,
+    execution_slice: dict | None = None,
 ) -> str:
     llm = llm or LLMClient()
     module = flow.get("module", "general")
@@ -901,7 +993,12 @@ def generate_spec(
 
     pom_names = flow.get("ui_pages", [])
     has_nav = any(_collect_nav_links(case, contract) for case in flow.get("cases", []))
+    use_allure = not use_llm_body
+    yaml_source = _yaml_source_string(yaml_path)
+
     imports = ["import { test, expect } from '@playwright/test'"]
+    if use_allure:
+        imports.append("import { allure } from 'allure-playwright'")
     if actor != "public":
         imports.append("import { hasAuthFixture, storageStatePath } from '../../helpers/auth-fixture'")
     nav_imported = False
@@ -923,8 +1020,15 @@ def generate_spec(
         "",
         *imports,
         "",
-        f"test.describe('{flow_id} {flow.get('flow_name', '')} {tag_str}', () => {{",
     ]
+    if use_allure:
+        describe_lines.append(f"const YAML_SOURCE = '{_escape_ts_string(yaml_source)}'")
+        describe_lines.append("")
+    describe_lines.extend(
+        [
+            f"test.describe('{flow_id} {flow.get('flow_name', '')} {tag_str}', () => {{",
+        ]
+    )
 
     if actor != "public":
         describe_lines.append(f"  test.skip(!hasAuthFixture('{actor}'), 'Auth fixture not configured')")
@@ -937,13 +1041,11 @@ def generate_spec(
     describe_lines.append("  })")
     describe_lines.append("")
 
+    exec_slice = execution_slice or {}
+
     if use_llm_body:
-        slice_data = contract.slice_for_module(module)
-        body = llm.complete(
-            spec_body_prompt(flow, slice_data, pom_names),
-            temperature=0.2,
-            max_tokens=2000,
-        )
+        messages = build_spec_body_messages(flow, exec_slice, pom_names)
+        body = llm.complete_messages(messages, temperature=0.2, max_tokens=2000)
         body = body.replace("```typescript", "").replace("```", "").strip()
         for line in body.splitlines():
             describe_lines.append(f"  {line}")
@@ -955,16 +1057,15 @@ def generate_spec(
             describe_lines.append(_test_open_line(case_id, title))
 
             refs_count = len([r for r in case.get("element_refs", []) if isinstance(r, dict)])
-            slice_data = contract.slice_for_case(case)
+            case_slice = slice_execution_for_case(exec_slice, case) if exec_slice else {}
 
-            if use_llm_spec and refs_count > 0 and not _is_nav_case(case, flow):
-                body = llm.complete(
-                    spec_case_prompt(case, slice_data, pom_names, flow_id=flow_id),
-                    temperature=0.2,
-                    max_tokens=2000,
+            if use_llm_spec and refs_count > 0 and not _is_nav_case(case, flow) and case_slice:
+                messages = build_spec_case_messages(
+                    case, case_slice, pom_names, flow_id=flow_id
                 )
+                body = llm.complete_messages(messages, temperature=0.2, max_tokens=2000)
                 body = _sanitize_llm_body(
-                    body, _allowed_selectors(slice_data), contract, case, slice_data
+                    body, _allowed_selectors(case_slice), contract, case, case_slice
                 )
                 if body and not all(
                     ln.strip().startswith("//") for ln in body.splitlines() if ln.strip()
@@ -972,8 +1073,12 @@ def generate_spec(
                     for line in body.splitlines():
                         describe_lines.append(f"    {line}" if line.strip() else "")
                 else:
+                    if use_allure:
+                        _emit_allure_metadata(describe_lines, case, flow, yaml_source)
                     _emit_deterministic_case_body(describe_lines, case, contract, start_path, flow)
             else:
+                if use_allure:
+                    _emit_allure_metadata(describe_lines, case, flow, yaml_source)
                 _emit_deterministic_case_body(describe_lines, case, contract, start_path, flow)
 
             describe_lines.append("  })")
@@ -1006,20 +1111,34 @@ def generate_spec_for_plan(
     with yaml_path.open(encoding="utf-8") as f:
         flow_data = yaml.safe_load(f) or {}
 
+    plan_path = root / "tests" / "testplan" / f"{plan_id}.md"
+    plan_meta = parse_plan_frontmatter(plan_path) if plan_path.is_file() else {"plan_id": plan_id}
+    slim_slice = load_plan_contract_slice(root, plan_meta)
+    if slim_slice is None:
+        log.warning(
+            "No contract slice for plan %s — falling back to trim_for_prompt",
+            plan_id,
+        )
+        slim_slice = contract.trim_for_prompt()
+
+    execution = build_execution_slice(contract, slim_slice, flow_data, plan_meta)
+    for warning in execution.get("warnings", []):
+        log.warning("  Execution slice: %s", warning)
+
+    execution_rel = f"tests/testplan/{plan_id}.execution-slice.json"
+    execution_path = root / execution_rel
+    execution_path.write_text(json.dumps(execution, indent=2), encoding="utf-8")
+    log.info("  Written execution slice: %s", execution_path)
+
+    flow_data = dict(flow_data)
+    flow_data["ui_pages"] = canonical_ui_pages(execution.get("page_sequence", []))
+
     written: list[Path] = []
 
-    page_id_map = {page_id_to_pom_name(p.get("page_id", "")): p for p in contract.pages}
-    for page_name in flow_data.get("ui_pages", []):
-        page_data = page_id_map.get(page_name)
-        if not page_data:
-            page_id_name = page_name.replace("Page", "").lower().replace("_", "-")
-            page_data = contract.get_page(page_id_name)
-        if not page_data:
-            log.warning("No contract page for POM %s — skipping", page_name)
-            continue
-
+    nav_const = _build_nav_links_constant(flow_data, contract)
+    for page_data in execution.get("pages", []):
+        page_name = page_id_to_pom_name(str(page_data.get("page_id", "")))
         pom_path = root / "tests" / "scripts" / "pages" / f"{page_name}.page.ts"
-        nav_const = _build_nav_links_constant(flow_data, contract)
         pom_content = (nav_const if nav_const else "") + generate_pom(page_data, page_name)
         pom_path.write_text(pom_content, encoding="utf-8")
         written.append(pom_path)
@@ -1035,7 +1154,12 @@ def generate_spec_for_plan(
             log.info("  Removed extra spec: %s", old.name)
 
     spec_content = generate_spec(
-        flow_data, contract, yaml_path, llm=llm, use_llm_spec=use_llm_spec
+        flow_data,
+        contract,
+        yaml_path,
+        llm=llm,
+        use_llm_spec=use_llm_spec,
+        execution_slice=execution,
     )
     out_spec.write_text(spec_content, encoding="utf-8")
     written.append(out_spec)

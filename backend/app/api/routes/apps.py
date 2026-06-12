@@ -1,15 +1,18 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 
 from app.models.schemas import (
+    AllureReportInfoResponse,
     AppDetailResponse,
     AppListResponse,
     FileContentResponse,
     FileListResponse,
+    GenerateAllureReportResponse,
     PlaywrightReportInfoResponse,
 )
 from app.services import artifacts
+from lib.allure_report import generate_allure_report
 
 router = APIRouter(prefix="/api/apps", tags=["apps"])
 
@@ -59,3 +62,32 @@ def playwright_report_index(slug: str):
 @router.get("/{slug}/playwright-report/{path:path}")
 def playwright_report_file(slug: str, path: str):
     return artifacts.serve_playwright_report(slug, path)
+
+
+@router.get("/{slug}/allure-report/info", response_model=AllureReportInfoResponse)
+def allure_report_info(slug: str) -> AllureReportInfoResponse:
+    info = artifacts.allure_report_info(slug)
+    return AllureReportInfoResponse(**info)
+
+
+@router.post("/{slug}/allure-report/generate", response_model=GenerateAllureReportResponse)
+def allure_report_generate(slug: str) -> GenerateAllureReportResponse:
+    try:
+        result = generate_allure_report(slug)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return GenerateAllureReportResponse(**result)
+
+
+@router.get("/{slug}/allure-report")
+def allure_report_index(slug: str):
+    return artifacts.serve_allure_report(slug, "")
+
+
+@router.get("/{slug}/allure-report/{path:path}")
+def allure_report_file(slug: str, path: str):
+    return artifacts.serve_allure_report(slug, path)

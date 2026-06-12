@@ -212,54 +212,109 @@ def testcase_yaml_prompt(
     )
 
 
-def spec_case_prompt(
+def spec_execution_context(execution_slice: dict) -> str:
+    """System message: execution contract metadata for Playwright codegen."""
+    app = execution_slice.get("application", {})
+    page_sequence = execution_slice.get("page_sequence", [])
+    return f"""You generate Playwright TypeScript E2E test code grounded in a scraped UI contract execution slice.
+
+The JSON below is EXECUTION CONTRACT METADATA for this flow. It is the only source of truth for:
+- pages in scope (page_id, path, title)
+- interactive elements (element_id, role, label, selectors.playwright, target_path, assert)
+- forms and fields referenced by the testcase
+- home_navigation entries when present
+
+Application: {app.get("name", "unknown")} ({app.get("base_url", "")})
+Resolved page sequence: {", ".join(page_sequence) if page_sequence else "(see pages below)"}
+
+Rules for using this metadata:
+- Use ONLY selectors.playwright from this execution slice — do NOT invent selectors or method names
+- FORBIDDEN: semantic POM helpers (e.g. clickAssetsButton, fillSearchInput, submitSearch)
+- element_id values must match the metadata exactly
+
+EXECUTION CONTRACT METADATA:
+{json.dumps(execution_slice, indent=2)}"""
+
+
+def spec_case_request(
     case: dict,
-    contract_slice: dict,
     pom_names: list[str],
     flow_id: str = "",
 ) -> str:
-    case_id = case.get("id", "case")
-    return f"""
-Generate the body of ONE Playwright TypeScript test() block (no imports, no describe wrapper).
+    return f"""Generate the body of ONE Playwright TypeScript test() block (no imports, no describe wrapper).
 
 Flow ID: {flow_id}
+POM classes available: {", ".join(pom_names)}
+
 Case:
 {json.dumps(case, indent=2)}
 
-Contract slice (ONLY allowed selectors and element_ids):
-{json.dumps(contract_slice, indent=2)}
-
-Contract element_ids (for reference): use selectors.playwright from the contract slice below — NOT invented names
-
 Rules:
 - Output ONLY statements inside the test body — do NOT include test(...) or closing }}); lines
-- Use ONLY selectors.playwright from the contract — do NOT invent selectors or method names
-- FORBIDDEN: semantic POM helpers (e.g. clickAssetsButton, fillSearchInput, submitSearch)
-- Use page.getByRole / page.locator patterns exactly as in contract selectors.playwright
-- Do NOT use page.goto inside the test — assume beforeEach navigates to home
+- Use page.getByRole / page.locator patterns exactly as in execution metadata selectors.playwright
+- Do NOT use page.goto inside the test — assume beforeEach navigates to the start page
 - Include url/hash assertions from contract assert metadata when clicking nav links
-- Output ONLY code, no markdown fences
-"""
+- Output ONLY code, no markdown fences"""
 
 
-def spec_body_prompt(flow_yaml: dict, contract_slice: dict, pom_names: list[str]) -> str:
-    return f"""
-Generate the body of a Playwright TypeScript E2E spec (imports and describe wrapper exist).
+def spec_body_request(flow_yaml: dict, pom_names: list[str]) -> str:
+    return f"""Generate the body of a Playwright TypeScript E2E spec (imports and describe wrapper exist).
 
 Flow YAML:
 {json.dumps(flow_yaml, indent=2)}
-
-Contract slice:
-{json.dumps(contract_slice, indent=2)}
 
 POM classes available: {", ".join(pom_names)}
 
 Rules:
 - Output ONLY TypeScript test() blocks inside the describe (no imports, no describe wrapper)
 - Use POM instances where possible
-- Use selectors.playwright from contract element_refs when provided
 - Tag each test with flow case id in the test name
 - Use test.skip for auth flows when actor needs login and no fixture note says otherwise
 - Do NOT use page.goto inside tests — assume beforeEach navigates
-- Output ONLY code, no markdown fences
-"""
+- Output ONLY code, no markdown fences"""
+
+
+def build_spec_case_messages(
+    case: dict,
+    execution_slice: dict,
+    pom_names: list[str],
+    flow_id: str = "",
+) -> list[dict[str, str]]:
+    return [
+        {"role": "system", "content": spec_execution_context(execution_slice)},
+        {"role": "user", "content": spec_case_request(case, pom_names, flow_id)},
+    ]
+
+
+def build_spec_body_messages(
+    flow_yaml: dict,
+    execution_slice: dict,
+    pom_names: list[str],
+) -> list[dict[str, str]]:
+    return [
+        {"role": "system", "content": spec_execution_context(execution_slice)},
+        {"role": "user", "content": spec_body_request(flow_yaml, pom_names)},
+    ]
+
+
+def spec_case_prompt(
+    case: dict,
+    contract_slice: dict,
+    pom_names: list[str],
+    flow_id: str = "",
+) -> str:
+    """Legacy single-string prompt. Prefer build_spec_case_messages."""
+    return (
+        spec_execution_context(contract_slice)
+        + "\n\n---\n\n"
+        + spec_case_request(case, pom_names, flow_id)
+    )
+
+
+def spec_body_prompt(flow_yaml: dict, contract_slice: dict, pom_names: list[str]) -> str:
+    """Legacy single-string prompt. Prefer build_spec_body_messages."""
+    return (
+        spec_execution_context(contract_slice)
+        + "\n\n---\n\n"
+        + spec_body_request(flow_yaml, pom_names)
+    )

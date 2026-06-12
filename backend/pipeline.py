@@ -22,6 +22,7 @@ from generators.testcase_generator import generate_all_testcases
 from lib.contract import DEFAULT_MODULES, load_contract
 from lib.llm import LLMClient
 from lib.paths import PIPELINE_VERSION, app_output_dir, contracts_dir, ensure_app_dirs
+from lib.scraper_credentials import load_scraper_credentials
 from scraper import scrape_website
 
 load_dotenv()
@@ -78,6 +79,7 @@ def run_pipeline(
             base_url=scrape_url,
             output_path=contract_path,
             max_pages=max_pages,
+            credentials=load_scraper_credentials(),
         )
         steps_run.append("scrape")
 

@@ -24,6 +24,15 @@ from lxml import etree
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright, Page, Browser
 
+from lib.scraper_auth import authenticate_at_url, authenticate_page, is_login_gate, is_login_path
+from lib.scraper_credentials import (
+    default_login_url,
+    resolve_auth_url,
+    has_auth_credentials,
+    load_scraper_credentials,
+    merge_legacy_cli_credentials,
+)
+
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -984,6 +993,97 @@ Rules:
             log.warning(f"LLM element description failed for {url}: {e}")
             return {"elements": {}, "forms": {}, "fields": {}}
 
+    def plan_auth_steps(
+        self,
+        *,
+        url: str,
+        title: str,
+        page_text: str,
+        forms: list[dict],
+        elements: list[dict],
+        available_keys: list[str],
+    ) -> dict:
+        """Plan login steps mapping env credential keys to form fields (no secret values)."""
+        if not available_keys:
+            return {"flow_type": "unknown", "steps": [], "success_hint": ""}
+
+        form_summary = [
+            {
+                "form_id": form.get("form_id"),
+                "method": form.get("method"),
+                "fields": [
+                    {
+                        "field_id": field.get("field_id"),
+                        "name": field.get("name"),
+                        "type": field.get("type"),
+                        "label": field.get("label"),
+                        "placeholder": field.get("placeholder"),
+                        "selectors": field.get("selectors"),
+                    }
+                    for field in form.get("fields", [])[:12]
+                ],
+            }
+            for form in forms[:4]
+        ]
+        button_summary = [
+            {
+                "element_id": el.get("element_id"),
+                "role": el.get("role"),
+                "label": el.get("label"),
+                "selectors": el.get("selectors"),
+            }
+            for el in elements
+            if el.get("role") in ("button", "link")
+            or (el.get("label") or "").lower()
+            in ("login", "sign in", "send otp", "verify", "submit", "continue")
+        ][:20]
+
+        prompt = f"""
+You are planning a Playwright login flow for QA web scraping.
+
+Page URL: {url}
+Page title: {title}
+Page text (truncated): {page_text[:800]}
+
+Forms:
+{json.dumps(form_summary, indent=2)}
+
+Buttons/links:
+{json.dumps(button_summary, indent=2)}
+
+Available credential keys (values are NOT provided — reference keys only):
+{json.dumps(available_keys)}
+
+Return ONLY JSON (no markdown):
+{{
+  "flow_type": "password | otp | mixed | unknown",
+  "steps": [
+    {{"action": "fill", "selector": "<css selector>", "credential_key": "<one of available keys>"}},
+    {{"action": "click", "selector": "<css selector>", "label_hint": "<button label>"}},
+    {{"wait_ms": 1500}}
+  ],
+  "success_hint": "url_path_not_login_or_dashboard"
+}}
+
+Rules:
+- Use only credential_key values from the available keys list.
+- Prefer stable CSS selectors from field selectors.xpath or [name=...], [id=...], [data-testid=...].
+- Support multi-step OTP: mobile (QA_TEST_MOBILE) -> click Send OTP -> wait -> fill QA_TEST_OTP -> submit.
+- Support password flow: QA_USERNAME then QA_PASSWORD then submit.
+- If this is not a login page, return "steps": [].
+- Maximum 8 steps.
+"""
+        try:
+            content = self._run(prompt)
+            content = content.replace("```json", "").replace("```", "").strip()
+            plan = json.loads(content)
+            if not isinstance(plan.get("steps"), list):
+                plan["steps"] = []
+            return plan
+        except Exception as e:
+            log.warning(f"LLM auth planning failed for {url}: {e}")
+            return {"flow_type": "unknown", "steps": [], "success_hint": ""}
+
 
 # ─────────────────────────────────────────────
 # Core Scraper
@@ -1003,19 +1103,28 @@ class WebScraper:
         delay: float = 0.5,
         wait_until: str = "load",
         probe_common_paths: bool = True,
+        credentials: Optional[dict[str, str]] = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.base_domain = urlparse(base_url).netloc
         self.wait_until = wait_until
         self.probe_common_paths = probe_common_paths
-        self.login_url = login_url
-        self.username = username
-        self.password = password
         self.username_selector = username_selector
         self.password_selector = password_selector
         self.submit_selector = submit_selector
         self.max_pages = max_pages
         self.delay = delay
+        self.credentials = merge_legacy_cli_credentials(
+            credentials if credentials is not None else load_scraper_credentials(),
+            login_url=login_url,
+            username=username,
+            password=password,
+        )
+        self.login_url = login_url or default_login_url(self.credentials, self.base_url)
+        self.username = username or self.credentials.get("QA_USERNAME")
+        self.password = password or self.credentials.get("QA_PASSWORD")
+        self.authenticated = False
+        self._auth_attempted = False
         self.llm = LLMAnalyzer()
         self.visited: set[str] = set()
         self.scraped_page_urls: set[str] = set()
@@ -1045,19 +1154,86 @@ class WebScraper:
                     log.warning(f"Fallback load failed for {url}: {fallback_error}")
             return None, None
 
-    def _login(self, page: Page):
-        if not self.login_url:
-            return
-        log.info(f"Logging in at {self.login_url}")
-        try:
-            page.goto(self.login_url, wait_until="domcontentloaded", timeout=15000)
-            page.fill(self.username_selector, self.username)
-            page.fill(self.password_selector, self.password)
-            page.click(self.submit_selector)
-            page.wait_for_load_state("domcontentloaded", timeout=10000)
-            log.info("Login successful")
-        except Exception as e:
-            log.warning(f"Login failed: {e}")
+    def _extract_scraped_page(
+        self,
+        page: Page,
+        page_url: str,
+        html: str,
+        depth: int,
+        *,
+        allow_auth: bool = True,
+    ) -> ScrapedPage:
+        soup = BeautifulSoup(html, "html.parser")
+        title = soup.title.string.strip() if soup.title else page_url
+        page_text = soup.get_text(separator=" ", strip=True)
+
+        page_links = extract_links_from_page(page, page_url, self.base_domain)
+        self.sitemap.all_links = merge_unique_links(self.sitemap.all_links, page_links)
+        clickables, forms = extract_clickables(soup, page_url)
+        analysis = self.llm.analyze_page(page_url, title, page_text, clickables)
+
+        if analysis.get("is_protected"):
+            for c in clickables:
+                if any(w in c.text.lower() for w in ["login", "sign in", "logout", "account", "profile"]):
+                    c.is_auth_required = True
+
+        elements = build_unified_elements(page_links, clickables, self.base_url)
+        contract_forms = build_contract_forms(forms, self.base_url)
+
+        if (
+            allow_auth
+            and not self.authenticated
+            and has_auth_credentials(self.credentials)
+            and is_login_gate(page_url, analysis.get("page_type", "unknown"), contract_forms)
+        ):
+            auth_url = resolve_auth_url(self.credentials, self.base_url, page_url)
+            if default_login_url(self.credentials, self.base_url):
+                auth_ok = authenticate_at_url(self, page, auth_url)
+            else:
+                auth_ok = authenticate_page(
+                    self,
+                    page,
+                    url=page_url,
+                    title=title,
+                    page_text=page_text,
+                    analysis=analysis,
+                    forms=contract_forms,
+                    elements=elements,
+                )
+            if auth_ok:
+                html, refreshed_url = self._get_page_html(page, page_url)
+                if html:
+                    return self._extract_scraped_page(
+                        page,
+                        refreshed_url or page_url,
+                        html,
+                        depth,
+                        allow_auth=False,
+                    )
+
+        descriptions = self.llm.describe_interactive_elements(
+            url=page_url,
+            title=title,
+            page_type=analysis.get("page_type", "unknown"),
+            page_notes=analysis.get("notes", ""),
+            elements=elements,
+            forms=contract_forms,
+        )
+        apply_descriptions(elements, contract_forms, descriptions)
+
+        return ScrapedPage(
+            url=page_url,
+            title=title,
+            is_protected=analysis.get("is_protected", False),
+            depth=depth,
+            clickables=clickables,
+            links=page_links,
+            elements=elements,
+            forms=contract_forms,
+            page_type=analysis.get("page_type", "unknown"),
+            test_priority=analysis.get("test_priority", "medium"),
+            llm_notes=analysis.get("notes", ""),
+        )
 
     def _discover_crawl_urls(
         self,
@@ -1126,9 +1302,9 @@ class WebScraper:
             context = browser.new_context()
             page = context.new_page()
 
-            # Login if credentials provided
-            if self.login_url and self.username and self.password:
-                self._login(page)
+            login_target = default_login_url(self.credentials, self.base_url)
+            if login_target and has_auth_credentials(self.credentials):
+                authenticate_at_url(self, page, login_target)
 
             # Start crawl queue with base URL + common static paths (SPA sites often hide these).
             queue = [self._normalise_url(self.base_url)]
@@ -1148,55 +1324,26 @@ class WebScraper:
                     continue
 
                 page_url = final_url or url
+                if (
+                    not self.authenticated
+                    and has_auth_credentials(self.credentials)
+                    and is_login_path(page_url)
+                    and not is_login_path(url)
+                ):
+                    auth_url = resolve_auth_url(self.credentials, self.base_url, page_url)
+                    if authenticate_at_url(self, page, auth_url):
+                        html, final_url = self._get_page_html(page, url)
+                        if not html:
+                            continue
+                        page_url = final_url or url
+
                 if page_url in self.scraped_page_urls:
                     log.info(f"  Skipping duplicate resolved page: {page_url}")
                     continue
                 self.scraped_page_urls.add(page_url)
 
-                soup = BeautifulSoup(html, "html.parser")
-                title = soup.title.string.strip() if soup.title else page_url
-                page_text = soup.get_text(separator=" ", strip=True)
-
-                # Extract links from live DOM (captures hash anchors + nav buttons).
-                page_links = extract_links_from_page(page, page_url, self.base_domain)
-                self.sitemap.all_links = merge_unique_links(self.sitemap.all_links, page_links)
-
-                # Extract clickables and forms from rendered HTML.
-                clickables, forms = extract_clickables(soup, page_url)
-
-                # LLM: analyse page
-                analysis = self.llm.analyze_page(page_url, title, page_text, clickables)
-
-                # Mark auth-required clickables (heuristic)
-                if analysis.get("is_protected"):
-                    for c in clickables:
-                        if any(w in c.text.lower() for w in ["login", "sign in", "logout", "account", "profile"]):
-                            c.is_auth_required = True
-
-                elements = build_unified_elements(page_links, clickables, self.base_url)
-                contract_forms = build_contract_forms(forms, self.base_url)
-                descriptions = self.llm.describe_interactive_elements(
-                    url=page_url,
-                    title=title,
-                    page_type=analysis.get("page_type", "unknown"),
-                    page_notes=analysis.get("notes", ""),
-                    elements=elements,
-                    forms=contract_forms,
-                )
-                apply_descriptions(elements, contract_forms, descriptions)
-
-                scraped = ScrapedPage(
-                    url=page_url,
-                    title=title,
-                    is_protected=analysis.get("is_protected", False),
-                    depth=len(self.visited),
-                    clickables=clickables,
-                    links=page_links,
-                    elements=elements,
-                    forms=contract_forms,
-                    page_type=analysis.get("page_type", "unknown"),
-                    test_priority=analysis.get("test_priority", "medium"),
-                    llm_notes=analysis.get("notes", ""),
+                scraped = self._extract_scraped_page(
+                    page, page_url, html, depth=len(self.visited)
                 )
                 self.sitemap.pages.append(scraped)
 
@@ -1205,7 +1352,8 @@ class WebScraper:
                 else:
                     self.sitemap.public_urls.append(page_url)
 
-                crawl_candidates = self._discover_crawl_urls(soup, page_url, page_links)
+                soup = BeautifulSoup(html, "html.parser")
+                crawl_candidates = self._discover_crawl_urls(soup, page_url, scraped.links)
                 unvisited = [u for u in crawl_candidates if u not in self.visited and u not in queue]
                 if unvisited:
                     selected = self._select_urls_to_crawl(unvisited, list(self.visited))
@@ -1214,8 +1362,8 @@ class WebScraper:
                             queue.append(candidate)
 
                 log.info(
-                    f"  Found {len(elements)} element(s), {len(contract_forms)} form(s) "
-                    f"({sum(1 for l in page_links if l.crawlable)} crawlable path(s))"
+                    f"  Found {len(scraped.elements)} element(s), {len(scraped.forms)} form(s) "
+                    f"({sum(1 for l in scraped.links if l.crawlable)} crawlable path(s))"
                 )
 
             browser.close()
@@ -1308,6 +1456,7 @@ def scrape_website(
     max_pages: int = 30,
     wait_until: str = "load",
     probe_common_paths: bool = True,
+    credentials: Optional[dict[str, str]] = None,
 ) -> str:
     """
     Scrape a website and save a JSON sitemap for test generation.
@@ -1337,6 +1486,7 @@ def scrape_website(
         max_pages=max_pages,
         wait_until=wait_until,
         probe_common_paths=probe_common_paths,
+        credentials=credentials,
     )
     sitemap = scraper.scrape()
     return save_sitemap(sitemap, output_path)
