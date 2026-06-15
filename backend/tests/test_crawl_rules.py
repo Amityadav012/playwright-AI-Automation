@@ -5,7 +5,9 @@ from __future__ import annotations
 import unittest
 
 from lib.crawl_rules import (
+    is_http_error_status,
     is_logout_url,
+    looks_like_error_page,
     looks_like_login_redirect,
     select_crawl_urls,
     stable_element_id,
@@ -93,6 +95,19 @@ class TestLoginRedirect(unittest.TestCase):
         self.assertFalse(looks_like_login_redirect(
             "https://app.com/home", "https://app.com/welcome"
         ))
+
+
+class TestErrorPages(unittest.TestCase):
+    def test_http_status_errors(self):
+        self.assertTrue(is_http_error_status(404))
+        self.assertTrue(is_http_error_status(502))
+        self.assertFalse(is_http_error_status(200))
+        self.assertFalse(is_http_error_status(None))
+
+    def test_error_page_content(self):
+        self.assertTrue(looks_like_error_page("502 Bad Gateway", "nginx error"))
+        self.assertTrue(looks_like_error_page("Not Found", "404 page"))
+        self.assertFalse(looks_like_error_page("Home", "Welcome to FPA dashboard"))
 
 
 class TestStableElementId(unittest.TestCase):
