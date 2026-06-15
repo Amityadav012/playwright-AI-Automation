@@ -14,6 +14,11 @@ LOGOUT_RE = re.compile(r"\b(log[-_]?out|sign[-_]?out)\b", re.I)
 
 LOGIN_PATH_RE = re.compile(r"login|signin|sign-in|authenticate", re.I)
 
+ERROR_PAGE_RE = re.compile(
+    r"\b(404|502|503|500|bad gateway|not found|service unavailable|gateway timeout)\b",
+    re.I,
+)
+
 # Path segments that are almost certainly record ids, not distinct page shapes:
 # pure numbers, UUIDs, long hex blobs, and mongo-style object ids.
 _ID_SEGMENT_RE = re.compile(
@@ -70,6 +75,23 @@ def looks_like_login_redirect(requested_url: str, final_url: str) -> bool:
     if (req.netloc, req.path.rstrip("/")) == (fin.netloc, fin.path.rstrip("/")):
         return False
     return bool(LOGIN_PATH_RE.search(fin.path)) and not LOGIN_PATH_RE.search(req.path)
+
+
+def is_http_error_status(status: int | None) -> bool:
+    """True for HTTP responses that should not be scraped as app pages."""
+    return status is not None and status >= 400
+
+
+def looks_like_error_page(
+    title: str,
+    page_text: str,
+    http_status: int | None = None,
+) -> bool:
+    """Detect 404/502-style pages even when status is missing or masked."""
+    if is_http_error_status(http_status):
+        return True
+    haystack = f"{title}\n{(page_text or '')[:800]}".lower()
+    return bool(ERROR_PAGE_RE.search(haystack))
 
 
 def stable_element_id(label: str, selector_key: str, fallback: str = "el") -> str:

@@ -26,11 +26,12 @@ from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright, Page, Browser
 
 from lib.contract_merge import merge_contracts, render_diff_markdown
-from lib.crawl_rules import looks_like_login_redirect, select_crawl_urls, url_template
+from lib.crawl_rules import looks_like_login_redirect, select_crawl_urls, url_template, is_http_error_status, looks_like_error_page
 from lib.llm import parse_json_response
 from lib.playwright_run import resolve_scraper_headless
-from lib.scraper_auth import authenticate_at_url, authenticate_page, is_login_gate, is_login_path
+from lib.scraper_auth import authenticate_at_url, authenticate_page, is_login_gate, is_login_path, probe_authentication_at_url
 from lib.scraper_credentials import (
+    available_fillable_keys,
     button_probe_limit,
     default_login_url,
     resolve_auth_url,
@@ -50,6 +51,7 @@ log = logging.getLogger(__name__)
 STATIC_ASSET_EXTENSIONS = (
     ".pdf", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg",
     ".zip", ".css", ".js", ".woff", ".woff2", ".ico", ".mp4",
+    ".pptx", ".ppt", ".xlsx", ".xls", ".docx", ".doc", ".csv",
 )
 
 COMMON_STATIC_PATHS = (
@@ -108,7 +110,7 @@ class ScrapedPage:
     test_priority: str = "medium"   # LLM-assigned: high | medium | low
     llm_notes: str = ""             # LLM summary of what this page does
     auth_context: str = "anonymous"  # anonymous | authenticated
-    scrape_status: str = "ok"       # ok | login_redirect
+    scrape_status: str = "ok"       # ok | login_redirect | load_failed | http_error | error_page
     ready_state: str = "stable"       # stable | timeout | n/a
 
 
@@ -1011,6 +1013,7 @@ Return ONLY JSON (no markdown):
   "flow_type": "password | otp | mixed | unknown",
   "steps": [
     {{"action": "fill", "selector": "<css selector>", "credential_key": "<one of available keys>"}},
+    {{"action": "fill_split_otp", "selector": "input.grm-otp-input-box", "credential_key": "QA_TEST_OTP"}},
     {{"action": "click", "selector": "<css selector>", "label_hint": "<button label>"}},
     {{"wait_ms": 1500}}
   ],
@@ -1025,9 +1028,13 @@ Credential key meanings (values are never provided):
 
 Rules:
 - Infer the login flow from the forms and buttons on THIS page only.
+- If the page only shows a "Sign in" / "Log in" button with no username/password fields visible yet, plan ONLY that click (and optional wait_ms) — the scraper will re-plan on the IdP page (e.g. Keycloak) after redirect.
 - Use only credential_key values from the available keys list.
 - Prefer stable CSS selectors from field selectors or [name=...], [id=...], [data-testid=...].
+- Selectors must be raw CSS only (e.g. `#username`, `[name=\"login\"]`) — never `page.locator(...)` or other Playwright API syntax.
 - Multi-step flows: fill fields in UI order; insert click steps for intermediate actions (e.g. request code) and wait_ms when a field appears after an action.
+- Mobile + OTP on the **same URL** (SPA): plan phase 1 only (mobile fill → Login/Send click → wait_ms). The scraper waits for OTP inputs, then fills split boxes (`fill_split_otp` with `.grm-otp-input-box` or `input[aria-label*='OTP character']`) and clicks Verify.
+- Button labels vary by app — use selectors from the page (`#submitButton`, `[type=submit]`, `:has-text('Verify')`), not hard-coded copy.
 - If this is not a login page, return "steps": [].
 - Maximum 8 steps.
 """
@@ -1139,29 +1146,74 @@ class WebScraper:
             time.sleep(0.3)
         return {"ready_state": state, "interactive_count": max(last, 0)}
 
+    def _try_recover_crawl_page(self, page: Page, recovery_url: str | None) -> None:
+        """After a bad navigation, return to the last good page so the crawl can continue."""
+        try:
+            page.evaluate("() => document.readyState")
+        except Exception:
+            log.warning("  Page context unusable after failed navigation — remaining queue may fail")
+            return
+        if not recovery_url:
+            return
+        try:
+            if self._normalise_url(page.url) != self._normalise_url(recovery_url):
+                page.goto(
+                    recovery_url,
+                    wait_until="domcontentloaded",
+                    timeout=navigation_timeout_ms(),
+                )
+                self._wait_for_page_ready(page)
+        except Exception as exc:
+            log.debug("Crawl recovery navigation: %s", exc)
+
     def _get_page_html(
-        self, page: Page, url: str
+        self, page: Page, url: str, *, recovery_url: str | None = None
     ) -> tuple[Optional[str], Optional[str], dict]:
         """Load a page and return (html, final_url_after_redirects, ready_meta)."""
-        try:
-            page.goto(url, wait_until=self.wait_until, timeout=navigation_timeout_ms())
-        except Exception as e:
-            log.warning(f"Failed to load {url} with wait_until={self.wait_until}: {e}")
+        meta: dict = {}
+        response = None
+
+        def _goto(wait_until: str) -> bool:
+            nonlocal response
+            try:
+                response = page.goto(url, wait_until=wait_until, timeout=navigation_timeout_ms())
+                return True
+            except Exception as e:
+                log.warning(f"Failed to load {url} with wait_until={wait_until}: {e}")
+                return False
+
+        if not _goto(self.wait_until):
             if self.wait_until != "domcontentloaded":
-                try:
-                    page.goto(
-                        url,
-                        wait_until="domcontentloaded",
-                        timeout=navigation_timeout_ms(),
-                    )
-                except Exception as fallback_error:
-                    log.warning(f"Fallback load failed for {url}: {fallback_error}")
-                    return None, None, {}
-            else:
-                return None, None, {}
+                _goto("domcontentloaded")
+            if response is None:
+                self._try_recover_crawl_page(page, recovery_url)
+                meta["skip_reason"] = "load_failed"
+                return None, None, meta
+
+        if is_http_error_status(response.status if response else None):
+            status = response.status if response else None
+            log.warning("  HTTP %s — skipping: %s", status, url)
+            self._try_recover_crawl_page(page, recovery_url)
+            meta["skip_reason"] = "http_error"
+            meta["http_status"] = status
+            return None, None, meta
+
         ready_meta = self._wait_for_page_ready(page)
         time.sleep(self.delay)
-        return page.content(), self._normalise_url(page.url), ready_meta
+        html = page.content()
+        final_url = self._normalise_url(page.url)
+        soup = BeautifulSoup(html, "html.parser")
+        title = soup.title.string.strip() if soup.title else final_url
+        page_text = soup.get_text(separator=" ", strip=True)
+        if looks_like_error_page(title, page_text, response.status if response else None):
+            log.warning("  Error page detected — skipping: %s", url)
+            self._try_recover_crawl_page(page, recovery_url)
+            meta["skip_reason"] = "error_page"
+            meta.update(ready_meta)
+            return None, None, meta
+
+        meta.update(ready_meta)
+        return html, final_url, meta
 
     def _seed_urls(self) -> list[str]:
         urls: list[str] = []
@@ -1338,8 +1390,14 @@ class WebScraper:
             if normalised not in queue:
                 queue.append(normalised)
 
+        last_good_url: str | None = None
+
         while queue and self.pages_attempted < self.max_pages:
             url = queue.pop(0)
+            if _is_static_asset(url):
+                log.info("  Skipping static/download URL: %s", url)
+                continue
+
             visit_key = (auth_context, url)
             if visit_key in self.visited:
                 continue
@@ -1349,8 +1407,19 @@ class WebScraper:
             log.info(
                 f"[{self.pages_attempted}/{self.max_pages}] ({auth_context}) Scraping: {url}"
             )
-            html, final_url, ready_meta = self._get_page_html(page, url)
+
+            try:
+                html, final_url, ready_meta = self._get_page_html(
+                    page, url, recovery_url=last_good_url
+                )
+            except Exception as exc:
+                log.warning("  Crawl step failed for %s: %s", url, exc)
+                self._try_recover_crawl_page(page, last_good_url)
+                continue
+
             if not html:
+                reason = ready_meta.get("skip_reason", "load_failed")
+                log.info("  Skipping bad page (%s): %s", reason, url)
                 continue
 
             page_url = final_url or url
@@ -1364,6 +1433,7 @@ class WebScraper:
                 continue
             self.scraped_page_urls.add(page_url)
             self.seen_templates.add(url_template(page_url))
+            last_good_url = page_url
 
             scraped = self._extract_scraped_page(
                 page,
@@ -1411,11 +1481,43 @@ class WebScraper:
                 f"enqueued {len(selected)} new URL(s)"
             )
 
+    def probe_auth(self, login_url: Optional[str] = None) -> dict:
+        """
+        Auth-only: open login page, plan and run login steps, return a report.
+        No crawl, no contract write. Use to iterate on login before a full scrape.
+        """
+        target = login_url or self.login_url or default_login_url(self.credentials, self.base_url)
+        if not target:
+            return {
+                "login_url": "",
+                "available_keys": available_fillable_keys(self.credentials),
+                "plan_source": "none",
+                "flow_type": "unknown",
+                "steps": [],
+                "success": False,
+                "final_url": "",
+                "error": "no_login_url_set_QA_LOGIN_URL",
+            }
+
+        self.authenticated = False
+        self._auth_attempted = False
+
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=self.headless)
+            page = browser.new_page()
+            try:
+                return probe_authentication_at_url(self, page, target)
+            finally:
+                if not self.headless:
+                    log.info("Headed auth probe: holding browser open for 10s before close")
+                    time.sleep(10)
+                browser.close()
+
     def scrape(self) -> SiteMap:
         with sync_playwright() as pw:
             browser: Browser = pw.chromium.launch(headless=self.headless)
 
-            context = browser.new_context()
+            context = browser.new_context(accept_downloads=False)
             page = context.new_page()
             initial = [self._normalise_url(self.base_url)]
             initial += self._probe_common_paths_list()
@@ -1426,7 +1528,7 @@ class WebScraper:
             if has_auth_credentials(self.credentials):
                 login_target = default_login_url(self.credentials, self.base_url)
                 if login_target:
-                    context = browser.new_context()
+                    context = browser.new_context(accept_downloads=False)
                     page = context.new_page()
                     self.authenticated = False
                     self._auth_attempted = False
@@ -1623,6 +1725,29 @@ def scrape_website(
     return save_sitemap(sitemap, output_path, merge=merge)
 
 
+def probe_scraper_auth(
+    base_url: str,
+    *,
+    login_url: Optional[str] = None,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    credentials: Optional[dict[str, str]] = None,
+    headed: bool = False,
+) -> dict:
+    """Run auth probe only (no crawl). Returns a JSON-safe report dict."""
+    scraper = WebScraper(
+        base_url=base_url,
+        login_url=login_url,
+        username=username,
+        password=password,
+        max_pages=1,
+        credentials=credentials,
+        headed=headed,
+        interact=False,
+    )
+    return scraper.probe_auth(login_url)
+
+
 # ─────────────────────────────────────────────
 # CLI runner
 # ─────────────────────────────────────────────
@@ -1655,7 +1780,30 @@ if __name__ == "__main__":
         action="store_true",
         help="Probe well-known static routes (/sitemap, /faq, …)",
     )
+    parser.add_argument(
+        "--auth-only",
+        action="store_true",
+        help="Only test login (no crawl, no contract). Prints JSON report to stdout.",
+    )
+    parser.add_argument(
+        "--headed",
+        action="store_true",
+        help="Show browser window during scrape or auth probe",
+    )
     args = parser.parse_args()
+
+    if args.auth_only:
+        import json as _json
+
+        report = probe_scraper_auth(
+            base_url=args.url,
+            login_url=args.login_url,
+            username=args.username,
+            password=args.password,
+            headed=args.headed,
+        )
+        print(_json.dumps(report, indent=2))
+        raise SystemExit(0 if report.get("success") else 1)
 
     path = scrape_website(
         base_url=args.url,
@@ -1669,5 +1817,6 @@ if __name__ == "__main__":
         interact=not args.no_interact,
         merge=not args.no_merge,
         probe_common_paths=args.probe_common_paths,
+        headed=args.headed,
     )
     print(f"\n✅ Done! Sitemap saved to: {path}")
