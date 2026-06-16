@@ -16,7 +16,7 @@ cd qa-automation/backend
 pip install -r requirements.txt
 playwright install chromium
 cp ../.env.example ../.env
-# Edit .env: QA_LOGIN_URL / QA_TEST_MOBILE / QA_TEST_OTP if the site needs auth during scrape
+# Edit .env for scraper login if needed — see GUIDE.md step 1 (username/password, email/password, or mobile+OTP)
 ```
 
 **End-to-end flow** — see [PROCESS.md](PROCESS.md):

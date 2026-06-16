@@ -43,13 +43,79 @@ If some pages aren't linked from the home page, add seed paths:
 ```
 
 If parts of the app need login, set the credentials in `.env` **before** scraping —
-never type them into chat or commit them:
+never type them into chat or commit them. Copy from `.env.example`.
 
-| `.env` variable | Purpose |
+### Scraper login styles (pick one per app)
+
+Always set:
+
+| Variable | Purpose |
 |---|---|
-| `QA_LOGIN_URL` | Login page URL |
-| `QA_USERNAME` / `QA_PASSWORD` | Password login |
-| `QA_TEST_MOBILE` / `QA_TEST_OTP` | OTP login |
+| `QA_LOGIN_URL` | Canonical login page URL for this app |
+
+Then pick **one** style and fill only those variables:
+
+| Style | Variables | Notes |
+|---|---|---|
+| Username + password | `QA_USERNAME`, `QA_PASSWORD` | Standard form login |
+| Email + password | `QA_USERNAME`, `QA_PASSWORD` | Put the email address in `QA_USERNAME` |
+| Mobile + OTP | `QA_TEST_MOBILE`, `QA_TEST_OTP` | Same-page SPA: mobile → Login → OTP boxes → Verify (e.g. Bihar Krishi) |
+| SSO gateway (Keycloak / OIDC) | `QA_USERNAME`, `QA_PASSWORD` | App shows **Sign in** only; scraper clicks through to IdP, then fills Keycloak form |
+
+**SSO example** (e.g. `https://talk2fpa.beehyv.com/login` → Keycloak):
+
+```env
+QA_LOGIN_URL=https://talk2fpa.beehyv.com/login
+QA_USERNAME=your_user
+QA_PASSWORD=your_password
+```
+
+Test with `--auth-only` first; report should show `"sso_gateway": true` and a `phases` array.
+
+**Examples** (in `qa-automation/.env`):
+
+```env
+# Username + password
+QA_LOGIN_URL=https://app.example.com/login
+QA_USERNAME=qa_user
+QA_PASSWORD=secret
+
+# Email + password
+QA_LOGIN_URL=https://app.example.com/login
+QA_USERNAME=qa@example.com
+QA_PASSWORD=secret
+
+# Mobile + OTP (e.g. Bihar Krishi staging — same page, split OTP boxes)
+QA_LOGIN_URL=https://staging.biharkrishi.in
+QA_TEST_MOBILE=9876543210
+QA_TEST_OTP=123456
+```
+
+**Rules:**
+- Do **not** set both password and OTP credential sets in the same `.env` — the scraper
+  infers flow type from which keys are present. Use one style per app.
+- `QA_AUTH_MODE` in `.env` is **planned** (`password` \| `email_password` \| `mobile_otp`
+  \| `auto`) but not enforced in code yet.
+- Scraper auth (above) is separate from **Playwright test auth** (step 10: `storageState`
+  JSON files under `tests/scripts/fixtures/auth/`).
+
+The scraper runs **two passes** when fillable credentials exist: anonymous crawl, then
+login + authenticated crawl of protected pages.
+
+### Fast auth testing (no full scrape)
+
+Before a long crawl, verify login alone:
+
+```bash
+cd backend
+python scraper.py https://your-qa-site.com --auth-only --login-url https://your-qa-site.com/login
+```
+
+With OTP creds in `.env`, add `--headed` to watch the browser. Prints a JSON report:
+`plan_source`, `flow_type`, `steps` (selectors only, no secrets), `success`, `final_url`, `error`.
+
+Exit code `0` = login succeeded; `1` = failed. Fix `.env` or selectors, then re-run until green,
+then run a full `/rescrape`.
 
 **Verify:** open `data/contracts/{app}-contract.json`.
 - Are all the important pages listed under `pages`?

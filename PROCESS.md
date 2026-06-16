@@ -20,13 +20,30 @@ Run each step in **Claude Code** or **Cursor** using the matching command in `.c
 
 ### Scraper auth (`.env`)
 
-| Variable | Purpose |
-|----------|---------|
-| `QA_LOGIN_URL` | Canonical login page |
-| `QA_USERNAME` / `QA_PASSWORD` | Password flow |
-| `QA_TEST_MOBILE` / `QA_TEST_OTP` | OTP flow |
+Copy `qa-automation/.env.example` → `.env`. Never commit secrets.
+
+| Style | Variables |
+|-------|-----------|
+| **Always** | `QA_LOGIN_URL` — login page for this app |
+| Username + password | `QA_USERNAME`, `QA_PASSWORD` |
+| Email + password | `QA_USERNAME` (email), `QA_PASSWORD` |
+| Mobile + OTP | `QA_TEST_MOBILE`, `QA_TEST_OTP` |
+| SSO gateway (Keycloak) | `QA_USERNAME`, `QA_PASSWORD` — app shows **Sign in** only; scraper clicks through to IdP |
+
+Use **one style per app** (do not mix password and OTP vars in the same `.env`).
+Full examples and rules: [GUIDE.md](GUIDE.md) step 1.
+
+**Fast auth check** (no crawl): from `backend/`:
+```bash
+python scraper.py https://talk2fpa.beehyv.com/login --auth-only --login-url https://talk2fpa.beehyv.com/login
+```
+Report includes `sso_gateway` and `phases` when the Sign-in → Keycloak path is detected.
+
+Playwright **test** login (storage state files) is separate — [GUIDE.md](GUIDE.md) step 10.
 
 Optional tuning: `QA_NAVIGATION_TIMEOUT_MS`, `QA_BUTTON_PROBE_LIMIT`
+
+Planned: `QA_AUTH_MODE=password|email_password|mobile_otp|auto` (not wired yet).
 
 ## 2. Add API/Swagger contract
 
