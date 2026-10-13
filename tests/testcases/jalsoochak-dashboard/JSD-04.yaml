@@ -1,0 +1,95 @@
+module: jalsoochak-dashboard
+flow_id: JSD-04
+flow_name: kpis_and_previous_period_comparisons
+priority: P0
+type: [e2e]
+tags: [smoke, regression]
+actors: [public]
+environments: {qa: '${QA_BASE_URL}'}
+api_endpoints: []
+ui_pages: [HomePage]
+rbac_checks: []
+source_plan: testplan.md
+scenario_ids: [TS-009, TS-010, TS-011]
+review_gate:
+  status: blocked
+  questions: [OQ-01, OQ-06]
+  reasons: [KPI value and comparison selectors absent, More info selector duplicated, Formatting and request-context mapping pending]
+  instruction: Only UI and consistency evidence is in scope; no invented business values or automatic execution.
+execution_context:
+  browser: chrome
+  viewport: {width: 1920, height: 1080}
+  access: anonymous_read_only
+  reset: Fresh context with approved scope dates and baseline language per case.
+contract_refs:
+  page_id: home
+  path: /
+  element_ids: [more_info_12]
+missing_selectors: [KPI labels and values, Comparison indicators, KPI-specific help containers]
+cases:
+  - id: JSD-04-H1
+    title: Five KPI labels, units, formatting and help
+    type: happy_path
+    test_type: [e2e]
+    priority: P0
+    tags: [smoke, regression]
+    scenario_ids: [TS-009]
+    preconditions: [KPI selectors captured, Labels units and formatting approved]
+    steps: [Inspect each KPI card, Compare labels units and formatting with approved UI definitions, Open the correct card's help control]
+    assertions: [all_approved_kpi_cards_visible, kpi_units_and_formatting_match_approved_definitions, help_matches_selected_kpi]
+    test_data_ref: JSD-04-H1
+    coverage_note: No numeric correctness claim is derived from the dashboard's own values.
+  - id: JSD-04-H2
+    title: Previous-period comparison presentation
+    type: happy_path
+    test_type: [e2e]
+    priority: P0
+    tags: [regression]
+    scenario_ids: [TS-010]
+    preconditions: [Comparison selectors captured, Period and indicator rules approved]
+    steps: [Load approved equal increasing and decreasing presentation fixtures, Observe comparison text units and direction indicator]
+    assertions: [comparison_presentation_matches_approved_fixture_and_period]
+    test_data_ref: JSD-04-H2
+    coverage_note: Checks presentation of reference inputs rather than claiming backend calculation accuracy.
+  - id: JSD-04-H3
+    title: KPI context follows applied dates and geography
+    type: happy_path
+    test_type: [e2e]
+    priority: P0
+    tags: [regression]
+    scenario_ids: [TS-011]
+    preconditions: [Approved two scopes and ranges, UI request-context mapping approved]
+    steps: [Apply each scope and range, Capture read-only response context and KPI rendering, Compare approved UI-to-response mapping]
+    assertions: [kpi_context_matches_applied_filters, displayed_kpis_consistent_with_approved_response_mapping]
+    test_data_ref: JSD-04-H3
+    coverage_note: Equal values across filters are allowed; context and mapped results must match, not merely differ.
+  - id: JSD-04-E1
+    title: Zero, missing and anomalous values and comparisons
+    type: edge_case
+    test_type: [e2e]
+    priority: P0
+    tags: [regression]
+    scenario_ids: [TS-009, TS-010]
+    preconditions: [Approved controlled response fixtures, Missing zero rounding and anomaly presentation rules approved]
+    steps: [Render each approved value variant in isolated interception, Inspect current and previous values indicators and help, Restore normal requests]
+    assertions: [value_and_comparison_states_match_approved_display_rules]
+    test_data_ref: JSD-04-E1
+    coverage_note: Missing data must not silently become zero; no unapproved percentage bounds or precision are imposed.
+  - id: JSD-04-E2
+    title: Partial KPI failure, stale responses and refresh during selection
+    type: edge_case
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-011]
+    preconditions: [Request mapping and final-context partial-failure rules approved]
+    steps: [Delay a previous scope response, Apply a new scope, Fail one mapped widget request, Observe final context and recover]
+    assertions: [final_kpi_context_matches_approved_latest_selection_rule, partial_failure_matches_approved_state_without_false_zero]
+    test_data_ref: JSD-04-E2
+    coverage_note: All failure simulation remains browser-local and does not change server data.
+test_data:
+  JSD-04-H1: {kpis: [Schemes Supplying Water, Quantity in MLD, Quantity in LPCD, Regularity, Critical Schemes], approved_formatting: null}
+  JSD-04-H2: {comparison_fixtures: null, period_rules: null}
+  JSD-04-H3: {scope_range_pairs: null, response_mapping: null}
+  JSD-04-E1: {variants: [zero, missing, negative, large, previous_zero, previous_missing, equal, increase, decrease, rounding_boundary], response_fixtures: null, display_rules: null}
+  JSD-04-E2: {request_patterns: null, delayed_response: null, partial_failure_rules: null}

@@ -1,0 +1,108 @@
+module: jalsoochak-dashboard
+flow_id: JSD-03
+flow_name: geography_and_filter_lifecycle
+priority: P0
+type: [e2e]
+tags: [smoke, regression]
+actors: [public]
+environments: {qa: '${QA_BASE_URL}'}
+api_endpoints: []
+ui_pages: [HomePage]
+rbac_checks: []
+source_plan: testplan.md
+scenario_ids: [TS-004, TS-005, TS-006, TS-007, TS-008]
+review_gate:
+  status: blocked
+  questions: [OQ-01, OQ-04, OQ-05]
+  reasons: [Assam hierarchy and search selectors missing, Hierarchy fixtures and dependent resets unapproved]
+  instruction: Resolve missing selectors and rules before execution; status is review metadata only.
+execution_context:
+  browser: chrome
+  viewport: {width: 1920, height: 1080}
+  access: anonymous_read_only
+  reset: Fresh context with approved unfiltered state between hierarchy paths and modes.
+contract_refs:
+  page_id: home
+  path: /
+  element_ids: [clear_all_filters_24]
+missing_selectors: [Administrative hierarchy, Departmental hierarchy, Search, Mode switch, Filter close]
+cases:
+  - id: JSD-03-H1
+    title: Select a valid administrative hierarchy
+    type: happy_path
+    test_type: [e2e]
+    priority: P0
+    tags: [smoke, regression]
+    scenario_ids: [TS-004]
+    preconditions: [Administrative controls captured, Approved hierarchy fixture with all five levels]
+    steps: [Select State then District then Block then Gram Panchayat then Village, Observe each child option set and applied geographic context]
+    assertions: [child_options_match_approved_parent_mapping, applied_scope_matches_selected_administrative_path]
+    test_data_ref: JSD-03-H1
+    coverage_note: Checks each hierarchy relationship rather than merely typing into search.
+  - id: JSD-03-H2
+    title: Select valid Departmental Zone and Circle
+    type: happy_path
+    test_type: [e2e]
+    priority: P0
+    tags: [regression]
+    scenario_ids: [TS-005]
+    preconditions: [Departmental controls captured, Approved Zone and Circle mapping]
+    steps: [Open Departmental mode, Select Zone and its Circle, Observe applied context]
+    assertions: [circle_options_match_selected_zone, applied_scope_matches_approved_departmental_path]
+    test_data_ref: JSD-03-H2
+    coverage_note: Uses a real mapping instead of assuming Departmental fields mirror Administrative fields.
+  - id: JSD-03-H3
+    title: Matching search in both geography modes
+    type: happy_path
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-004, TS-005, TS-007]
+    preconditions: [Search selectors captured, Exact partial and normalization rules approved]
+    steps: [Search approved exact and partial names in each mode, Select a result, Check its parent identity and selected scope]
+    assertions: [search_results_match_approved_matching_rule, chosen_result_preserves_geographic_identity]
+    test_data_ref: JSD-03-H3
+    coverage_note: Covers result selection as well as input value acceptance.
+  - id: JSD-03-E1
+    title: No matches, Unicode, whitespace, punctuation and duplicate names
+    type: edge_case
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-007]
+    preconditions: [Search rules and fixtures approved]
+    steps: [Run each search variant independently, Inspect no-result or matching presentation, Disambiguate duplicate names by approved parent context]
+    assertions: [search_variant_outcome_matches_approved_rule, duplicate_names_do_not_select_unintended_geography]
+    test_data_ref: JSD-03-E1
+    coverage_note: Does not fabricate a no-result message or search case-sensitivity rule.
+  - id: JSD-03-E2
+    title: Change selected parent, switch modes and clear or close filters
+    type: edge_case
+    test_type: [e2e]
+    priority: P0
+    tags: [regression]
+    scenario_ids: [TS-004, TS-005, TS-006, TS-008]
+    preconditions: [Dependent reset and mode-switch rules approved, Valid selected child fixture]
+    steps: [Change parent after selecting a child, Switch modes with dates and geography selected, Test Clear twice Escape and outside click independently, Refresh and navigate back]
+    assertions: [dependent_selections_match_approved_reset_rule, visible_fields_and_context_match_selected_mode, clear_close_and_navigation_match_approved_lifecycle]
+    test_data_ref: JSD-03-E2
+    coverage_note: Separates closing a menu from resetting selected filters.
+  - id: JSD-03-E3
+    title: Rapid searches, out-of-order responses and leaf nodes
+    type: edge_case
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-004, TS-005, TS-007]
+    preconditions: [Read-only request interception mapped, Latest-selection and leaf-node rules approved]
+    steps: [Issue two searches with reversed response arrival, Select a fixture with no children, Inspect final options and context, Remove interception]
+    assertions: [final_results_match_approved_latest_query_rule, leaf_node_behavior_matches_approved_mapping]
+    test_data_ref: JSD-03-E3
+    coverage_note: Avoids treating stale responses as valid current selections.
+test_data:
+  JSD-03-H1: {administrative_path: null}
+  JSD-03-H2: {departmental_path: null}
+  JSD-03-H3: {exact_queries: null, partial_queries: null, expected_result_ids: null}
+  JSD-03-E1: {variants: [no_match, empty, whitespace, mixed_case, punctuation, unicode, duplicate_name], expected_results: null}
+  JSD-03-E2: {alternate_parent: null, mode_transition_rules: null, clear_close_rules: null}
+  JSD-03-E3: {queries: null, request_patterns: null, leaf_node: null, approved_latest_query_rule: null}

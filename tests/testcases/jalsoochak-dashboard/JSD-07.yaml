@@ -1,0 +1,95 @@
+module: jalsoochak-dashboard
+flow_id: JSD-07
+flow_name: regularity_and_quantity_charts
+priority: P1
+type: [e2e]
+tags: [regression]
+actors: [public]
+environments: {qa: '${QA_BASE_URL}'}
+api_endpoints: []
+ui_pages: [HomePage]
+rbac_checks: []
+source_plan: testplan.md
+scenario_ids: [TS-020, TS-021, TS-022, TS-023, TS-024, TS-025]
+review_gate:
+  status: blocked
+  questions: [OQ-01, OQ-06, OQ-08]
+  reasons: [Series and tooltip selectors missing, Time selectors duplicated, Demand and time aggregation rules pending]
+  instruction: Resolve chart-scoped selectors and approved definitions before script generation.
+execution_context:
+  browser: chrome
+  viewport: {width: 1920, height: 1080}
+  access: anonymous_read_only
+  reset: Fresh context with explicit chart mode dates and scope per case.
+contract_refs:
+  page_id: home
+  path: /
+  element_ids: [geography_26, geography_28, time_37, time_41]
+missing_selectors: [Chart containers and series, Axis labels, Tooltips, Chart scroll containers]
+cases:
+  - id: JSD-07-H1
+    title: Regularity geography chart labels, percentage presentation and context
+    type: happy_path
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-020, TS-022]
+    preconditions: [Regularity selectors captured, Approved formatting fixtures and response mapping]
+    steps: [Load approved hierarchy and range, Inspect Regularity geography labels and percentage formatting, Compare applied context with mapped series response]
+    assertions: [regularity_labels_and_units_match_approved_definition, regularity_series_consistent_with_approved_response_mapping]
+    test_data_ref: JSD-07-H1
+    coverage_note: Numerical calculation validation remains outside scope.
+  - id: JSD-07-H2
+    title: Quantity chart labels, LPCD and Demand series context
+    type: happy_path
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-023, TS-025]
+    preconditions: [Quantity selectors captured, Demand definition and response mapping approved]
+    steps: [Load approved hierarchy and range, Inspect geography Quantity LPCD and Demand labels, Compare series association and mapped request context]
+    assertions: [quantity_and_demand_presentation_match_approved_definition, quantity_chart_context_matches_approved_filters]
+    test_data_ref: JSD-07-H2
+    coverage_note: Does not assume Demand is constant across areas or time.
+  - id: JSD-07-H3
+    title: Geography and Time views for both charts
+    type: happy_path
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-021, TS-024]
+    preconditions: [Chart-specific menu selectors audited, Time bucket and ordering rules approved]
+    steps: [Switch each chart independently between Geography and Time, Inspect relevant axes categories and selected view, Scroll all approved categories]
+    assertions: [each_chart_view_matches_approved_mode, all_approved_categories_reachable]
+    test_data_ref: JSD-07-H3
+    coverage_note: Duplicate Time controls must be scoped to their own chart menu.
+  - id: JSD-07-E1
+    title: Empty, single and many categories, equal series and long labels
+    type: edge_case
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-020, TS-021, TS-023, TS-024]
+    preconditions: [Approved fixture variants and empty-state formatting]
+    steps: [Render each chart variant separately, Inspect axes labels and tooltips, Scroll populated long fixtures]
+    assertions: [chart_variant_matches_approved_presentation, labels_and_tooltips_do_not_clip_or_overlap, complete_fixture_categories_reachable]
+    test_data_ref: JSD-07-E1
+    coverage_note: A section title is not sufficient evidence of a populated chart.
+  - id: JSD-07-E2
+    title: Missing time buckets, date changes and late view responses
+    type: edge_case
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-021, TS-022, TS-024, TS-025]
+    preconditions: [Time aggregation missing-bucket and latest-context rules approved, Browser-local request mapping available]
+    steps: [Render missing-bucket fixture, Change dates in Time view, Reverse old and new view-response arrival, Observe final view and context then remove interception]
+    assertions: [missing_buckets_follow_approved_rule, final_chart_context_matches_approved_latest_selection, time_series_matches_approved_aggregation_mapping]
+    test_data_ref: JSD-07-E2
+    coverage_note: Does not invent zero-fill interpolation or demand aggregation behavior.
+test_data:
+  JSD-07-H1: {scope_range_pairs: null, regularity_mapping: null, formatting_rules: null}
+  JSD-07-H2: {scope_range_pairs: null, quantity_mapping: null, demand_definition: null}
+  JSD-07-H3: {charts: [Regularity, Quantity], time_buckets: null, expected_categories: null}
+  JSD-07-E1: {variants: [empty, single, many, equal_series, long_labels], chart_fixtures: null}
+  JSD-07-E2: {missing_bucket_fixture: null, date_pairs: null, request_patterns: null, aggregation_rules: null}

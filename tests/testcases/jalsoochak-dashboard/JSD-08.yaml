@@ -1,0 +1,95 @@
+module: jalsoochak-dashboard
+flow_id: JSD-08
+flow_name: reading_submission_charts
+priority: P1
+type: [e2e]
+tags: [regression]
+actors: [public]
+environments: {qa: '${QA_BASE_URL}'}
+api_endpoints: []
+ui_pages: [HomePage]
+rbac_checks: []
+source_plan: testplan.md
+scenario_ids: [TS-026, TS-027, TS-028, TS-029]
+review_gate:
+  status: blocked
+  questions: [OQ-01, OQ-06, OQ-08]
+  reasons: [Reading-chart elements absent from contract, Status and rate denominator and formatting rules pending]
+  instruction: No fabricated chart IDs or inferred denominator relationships; resolve blockers before generation.
+execution_context:
+  browser: chrome
+  viewport: {width: 1920, height: 1080}
+  access: anonymous_read_only
+  reset: Fresh context with approved populated or empty fixture and selected dates and scope.
+contract_refs:
+  page_id: home
+  path: /
+  element_ids: []
+missing_selectors: [Status chart, Rate chart, Legends, Series, Info controls, Scroll containers]
+cases:
+  - id: JSD-08-H1
+    title: Submission Status segments, legend, values and help
+    type: happy_path
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-026]
+    preconditions: [Chart captured in contract, Approved mixed-status presentation fixture]
+    steps: [Load mixed Compliant and Anomalous submissions fixture, Inspect segments values legend and help]
+    assertions: [status_segments_and_labels_match_approved_fixture_mapping, status_help_matches_approved_definition]
+    test_data_ref: JSD-08-H1
+    coverage_note: Verifies populated content rather than passing on a chart heading or empty placeholder.
+  - id: JSD-08-H2
+    title: Submission Rate percentages, geography, scrolling and help
+    type: happy_path
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-028]
+    preconditions: [Rate chart and scroll selectors captured, Approved rate presentation fixture]
+    steps: [Inspect approved geography and percentage records, Scroll through all fixture categories, Open chart help]
+    assertions: [rate_labels_and_percentages_match_approved_mapping, all_rate_fixture_categories_reachable, rate_help_matches_approved_definition]
+    test_data_ref: JSD-08-H2
+    coverage_note: No unapproved percentage bounds are imposed.
+  - id: JSD-08-H3
+    title: Both reading charts follow dates and administrative scope
+    type: happy_path
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-027, TS-029]
+    preconditions: [Approved hierarchy and range fixtures, Separate status and rate response mappings]
+    steps: [Apply each approved hierarchy and date pair, Capture mapped reading request contexts, Compare rendered chart context and category association]
+    assertions: [status_context_matches_approved_filter_mapping, rate_context_matches_approved_filter_mapping]
+    test_data_ref: JSD-08-H3
+    coverage_note: UI/API consistency is not independent validation of backend business calculations.
+  - id: JSD-08-E1
+    title: No submissions, all compliant, all anomalous and missing denominator
+    type: edge_case
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-026, TS-028]
+    preconditions: [Approved empty extreme and undefined-rate fixtures and rules]
+    steps: [Render each fixture independently through read-only interception, Inspect chart state legend and percentage presentation, Remove interception]
+    assertions: [empty_and_extreme_status_states_match_approved_rules, undefined_rate_is_not_silently_rendered_as_zero_unless_approved]
+    test_data_ref: JSD-08-E1
+    coverage_note: Status and rate are not assumed to share a denominator or sum to the same total.
+  - id: JSD-08-E2
+    title: Duplicate submissions, rounding boundaries and missing geography labels
+    type: edge_case
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-026, TS-027, TS-028, TS-029]
+    preconditions: [Approved duplicate missing-label and rounding presentation rules]
+    steps: [Render approved anomaly fixtures, Apply another approved scope, Inspect chart record association formatting and latest context]
+    assertions: [duplicate_and_missing_label_presentation_matches_approved_rules, rounded_rate_matches_approved_mapping, chart_context_remains_associated_with_selected_scope]
+    test_data_ref: JSD-08-E2
+    coverage_note: No deduplication algorithm or fallback label is invented.
+test_data:
+  JSD-08-H1: {mixed_status_fixture: null, status_mapping: null, help_definition: null}
+  JSD-08-H2: {rate_fixture: null, expected_category_ids: null, percentage_format: null}
+  JSD-08-H3: {hierarchy_range_pairs: null, status_mapping: null, rate_mapping: null}
+  JSD-08-E1: {variants: [no_submissions, all_compliant, all_anomalous, missing_denominator], response_fixtures: null, presentation_rules: null}
+  JSD-08-E2: {variants: [duplicate_submission, rounding_boundary, missing_geography_label], response_fixtures: null, anomaly_rules: null}

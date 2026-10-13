@@ -1,0 +1,107 @@
+module: jalsoochak-dashboard
+flow_id: JSD-02
+flow_name: dates_and_quick_ranges
+priority: P0
+type: [e2e]
+tags: [smoke, regression]
+actors: [public]
+environments: {qa: '${QA_BASE_URL}'}
+api_endpoints: []
+ui_pages: [HomePage]
+rbac_checks: []
+source_plan: testplan.md
+scenario_ids: [TS-003]
+review_gate:
+  status: blocked
+  questions: [OQ-01, OQ-03, OQ-04]
+  reasons: [Canonical route needs capture, Start and end selectors are identical, Date bounds and reset rules unapproved]
+  instruction: Review metadata is not a runner-enforced skip; resolve blockers before script generation.
+execution_context:
+  browser: chrome
+  viewport: {width: 1920, height: 1080}
+  access: anonymous_read_only
+  reset: Fresh context and approved baseline range per case; explicit timezone and fixed clock for relative ranges.
+contract_refs:
+  page_id: home
+  path: /
+  element_ids: ['08_10_2026_11', dd_mm_yyyy_52, dd_mm_yyyy_54, yesterday_17, apply_23, clear_22]
+cases:
+  - id: JSD-02-H1
+    title: Valid single-day and multi-day ranges apply
+    type: happy_path
+    test_type: [e2e]
+    priority: P0
+    tags: [smoke, regression]
+    scenario_ids: [TS-003]
+    preconditions: [Start and end selectors disambiguated, Valid dates and inclusive bounds approved]
+    steps: [Open Duration, Enter each approved valid date pair, Apply and observe selected range and dashboard request context]
+    assertions: [entered_dates_match_selected_range, applied_request_context_matches_approved_dates]
+    test_data_ref: JSD-02-H1
+    coverage_note: Confirms valid selection without requiring all widget values to change.
+  - id: JSD-02-H2
+    title: All quick ranges resolve using the agreed clock and timezone
+    type: happy_path
+    test_type: [e2e]
+    priority: P0
+    tags: [regression]
+    scenario_ids: [TS-003]
+    preconditions: [Quick ranges captured, Clock timezone and week-start rules approved]
+    steps: [Freeze the approved browser clock, Select each displayed quick range independently, Compare computed dates with approved range fixtures]
+    assertions: [quick_range_dates_match_approved_boundaries]
+    test_data_ref: JSD-02-H2
+    coverage_note: Covers relative date boundaries without relying on the test machine's current date.
+  - id: JSD-02-E1
+    title: Reversed, empty, malformed and impossible dates
+    type: edge_case
+    test_type: [e2e]
+    priority: P0
+    tags: [regression]
+    scenario_ids: [TS-003]
+    preconditions: [Invalid-input validation or normalization rules approved]
+    steps: [Reset between input variants, Enter each invalid pair, Attempt Apply and inspect validation and request context]
+    assertions: [invalid_input_outcome_matches_approved_rule, request_context_matches_approved_validation_result]
+    test_data_ref: JSD-02-E1
+    coverage_note: Does not invent rejection messages or assume invalid input is never normalized.
+  - id: JSD-02-E2
+    title: Leap day, rollover, future dates, oldest date and maximum span
+    type: edge_case
+    test_type: [e2e]
+    priority: P0
+    tags: [regression]
+    scenario_ids: [TS-003]
+    preconditions: [Supported date bounds maximum span and timezone approved]
+    steps: [Test approved boundary fixtures and just-outside variants, Apply each range independently, Inspect range and outcome]
+    assertions: [boundary_range_outcome_matches_approved_limits]
+    test_data_ref: JSD-02-E2
+    coverage_note: Calendar-valid dates may still be outside the supported dataset window.
+  - id: JSD-02-E3
+    title: Clear and close before versus after Apply
+    type: edge_case
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-003]
+    preconditions: [Staging Clear and close semantics approved]
+    steps: [Edit without applying and close, Reopen and inspect state, Clear before and after Apply in separate contexts, Refresh after applying]
+    assertions: [staged_and_applied_states_match_approved_lifecycle]
+    test_data_ref: JSD-02-E3
+    coverage_note: Distinguishes panel Clear from dashboard-wide reset and persistence.
+  - id: JSD-02-E4
+    title: Quick range manual edit, double Apply and request failure
+    type: edge_case
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-003]
+    preconditions: [Approved valid fixtures, Request mapping and failure rules approved]
+    steps: [Select quick range then edit manually, Apply twice, Simulate failure in a separate intercepted context, Restore normal requests]
+    assertions: [effective_range_matches_latest_approved_selection, failed_apply_matches_approved_recovery_behavior]
+    test_data_ref: JSD-02-E4
+    coverage_note: Covers competing date input paths and recovery without assuming a duplicate-request limit.
+test_data:
+  JSD-02-H1: {valid_date_pairs: null, timezone: null, request_context_mapping: null}
+  JSD-02-H2: {quick_ranges: discover_from_panel, fixed_clock: null, timezone: null, week_start: null, expected_ranges: null}
+  JSD-02-E1: {variants: [reversed, start_empty, end_empty, both_empty, malformed, impossible_calendar_date], expected_rules: null}
+  JSD-02-E2: {variants: [same_day, leap_day, month_rollover, year_rollover, future, oldest_supported, before_oldest, maximum_span, beyond_maximum_span], approved_dates: null, limits: null}
+  JSD-02-E3: {baseline_range: null, clear_rule: null, close_rule: null, refresh_rule: null}
+  JSD-02-E4: {valid_range: null, request_pattern: null, failure_outcome: null}

@@ -1,0 +1,95 @@
+module: jalsoochak-dashboard
+flow_id: JSD-09
+flow_name: footer_and_public_destinations
+priority: P1
+type: [e2e]
+tags: [smoke, regression]
+actors: [public]
+environments: {qa: '${QA_BASE_URL}'}
+api_endpoints: []
+ui_pages: [HomePage, GlossaryPage]
+rbac_checks: []
+source_plan: testplan.md
+scenario_ids: [TS-030, TS-031, TS-032, TS-033]
+review_gate:
+  status: blocked
+  questions: [OQ-01, OQ-09, OQ-11]
+  reasons: [Officer-link selectors share href, Assam page not captured, PHED JJM contact and visitor-count requirements unconfirmed]
+  instruction: Do not log in send OTP launch a mail client or replace missing required links with observed alternatives.
+execution_context:
+  browser: chrome
+  viewport: {width: 1920, height: 1080}
+  access: anonymous_read_only
+  reset: Fresh context per destination; close child tabs and restore approved route.
+contract_refs:
+  page_id: home
+  path: /
+  element_ids: [sub_divisional_officer_login_4, section_officer_login_5, system_users_login_6, dashboard_glossary_8, jalsoochak_website_7, x_twitter_1, linkedin_2, email_3, arghyam_9]
+missing_selectors: [Contact text, Copyright, PHED Assam, JJM Assam, Visitor count]
+cases:
+  - id: JSD-09-H1
+    title: Officer and system login destinations and public glossary
+    type: happy_path
+    test_type: [e2e]
+    priority: P1
+    tags: [smoke, regression]
+    scenario_ids: [TS-030]
+    preconditions: [Footer selectors audited by label, Canonical route approved]
+    steps: [Inspect each officer and system login href without submitting forms, Open public glossary, Check its route and restore dashboard]
+    assertions: [officer_login_links_resolve_to_staff_login, system_login_link_resolves_to_login, glossary_navigates_to_contract_path]
+    test_data_ref: JSD-09-H1
+    coverage_note: Two links sharing a destination must still be verified as separate labeled links.
+  - id: JSD-09-H2
+    title: Website, social, mail and attribution destinations
+    type: happy_path
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-030, TS-031, TS-033]
+    preconditions: [Contract destinations revalidated on approved route, External navigation approved]
+    steps: [Inspect website social mail and Arghyam destinations against contract, Inspect new-tab behavior for external links, Check mailto without invoking a client]
+    assertions: [destinations_match_contract_raw_href, tab_behavior_matches_contract_opens_new_tab, email_href_matches_approved_contact]
+    test_data_ref: JSD-09-H2
+    coverage_note: Destination correctness is distinct from external website availability.
+  - id: JSD-09-H3
+    title: Required footer links, contact details, copyright and visitor section
+    type: happy_path
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-030, TS-032, TS-033]
+    preconditions: [OQ-09 required items and destinations approved, Missing footer elements captured]
+    steps: [Inspect approved PHED Assam and JJM Assam requirements, Check approved contact text and applicable links, Inspect copyright attribution and visitor-count section]
+    assertions: [all_approved_required_footer_items_present, contact_details_match_approved_reference, copyright_and_visitor_presentation_match_approved_rules]
+    test_data_ref: JSD-09-H3
+    coverage_note: Missing plan requirements are not silently omitted because the current contract lacks them.
+  - id: JSD-09-E1
+    title: Relative links, blocked tabs and unavailable external destinations
+    type: edge_case
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-030, TS-031]
+    preconditions: [Approved tab lifecycle and external failure classification]
+    steps: [Resolve relative destinations against approved base URL, Observe approved isolated new-tab navigation, Simulate external unavailability locally and restore context]
+    assertions: [resolved_destinations_match_approved_contract, external_failure_report_distinguishes_link_error_from_remote_unavailability]
+    test_data_ref: JSD-09-E1
+    coverage_note: Does not classify a correct href as an application defect merely because a third party is down.
+  - id: JSD-09-E2
+    title: Keyboard access, year rollover and unavailable visitor count
+    type: edge_case
+    test_type: [e2e]
+    priority: P2
+    tags: [regression]
+    scenario_ids: [TS-031, TS-032, TS-033]
+    preconditions: [Keyboard expectations approved, Copyright-year and unavailable-count rules approved]
+    steps: [Navigate footer controls by keyboard without invoking mail clients, Inspect year-boundary presentation using approved clock fixture, Simulate unavailable visitor data if required]
+    assertions: [footer_focus_matches_approved_keyboard_behavior, copyright_year_matches_approved_rule, unavailable_visitor_count_matches_approved_state]
+    test_data_ref: JSD-09-E2
+    coverage_note: Does not assume the copyright year must always equal the machine's current year.
+test_data:
+  JSD-09-H1: {officer_path: /staff/login, system_path: /login, glossary_path: /glossary}
+  JSD-09-H2: {destination_source: data/contracts/jalsoochak-contract.json, mailto: 'mailto:info@arghyam.org'}
+  JSD-09-H3: {phed_required: null, jjm_required: null, approved_destinations: null, contact_reference: null, visitor_rules: null}
+  JSD-09-E1: {base_url: '${QA_BASE_URL}', external_failure_rules: null, tab_rules: null}
+  JSD-09-E2: {keyboard_rules: null, fixed_clock: null, copyright_rule: null, unavailable_visitor_rule: null}

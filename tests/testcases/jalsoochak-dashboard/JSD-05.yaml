@@ -1,0 +1,95 @@
+module: jalsoochak-dashboard
+flow_id: JSD-05
+flow_name: map_and_geographic_navigation
+priority: P0
+type: [e2e]
+tags: [smoke, regression]
+actors: [public]
+environments: {qa: '${QA_BASE_URL}'}
+api_endpoints: []
+ui_pages: [HomePage]
+rbac_checks: []
+source_plan: testplan.md
+scenario_ids: [TS-012, TS-013, TS-014, TS-015, TS-016]
+review_gate:
+  status: blocked
+  questions: [OQ-01, OQ-06, OQ-07, OQ-10]
+  reasons: [Map metric recorded as textbox instead of checkbox, Regions legends and breadcrumbs absent, Hierarchy and legend definitions pending]
+  instruction: Do not replace map-region interaction with table clicks; resolve gates before generating scripts.
+execution_context:
+  browser: chrome
+  viewport: {width: 1920, height: 1080}
+  access: anonymous_read_only
+  reset: Fresh context with approved baseline metric geographic scope and dates per case.
+contract_refs:
+  page_id: home
+  path: /
+  element_ids: [district_view_14, show_fullscreen_map_15, switch_map_metric_currently_selected_regularity_42]
+missing_selectors: [Map regions, Legend, Tooltip, Breadcrumbs, Fullscreen exit]
+cases:
+  - id: JSD-05-H1
+    title: Map boundaries, labels, legend and fullscreen
+    type: happy_path
+    test_type: [e2e]
+    priority: P0
+    tags: [smoke, regression]
+    scenario_ids: [TS-012]
+    preconditions: [Map selectors refreshed, Approved geographic fixture with geometry, Legend and design definitions approved]
+    steps: [Load approved map scope, Inspect boundaries labels legend and colors, Expand fullscreen and exit using the captured control]
+    assertions: [map_represents_approved_geography, legend_matches_approved_metric_definition, fullscreen_preserves_context_and_restores_layout]
+    test_data_ref: JSD-05-H1
+    coverage_note: Checks real map rendering rather than only presence of the fullscreen button.
+  - id: JSD-05-H2
+    title: Map-region drill-down and drill-up through all supported levels
+    type: happy_path
+    test_type: [e2e]
+    priority: P0
+    tags: [regression]
+    scenario_ids: [TS-013, TS-016]
+    preconditions: [Actual map-region targets and breadcrumbs captured, Approved State to Village path]
+    steps: [Click each map region along the approved hierarchy, Inspect map and breadcrumb at each level, Navigate up through captured map navigation]
+    assertions: [map_scope_and_breadcrumb_match_approved_hierarchy, drill_up_restores_approved_parent_scope]
+    test_data_ref: JSD-05-H2
+    coverage_note: Table-row drill-down cannot satisfy this map interaction case.
+  - id: JSD-05-H3
+    title: Quantity and Regularity toggle and filter consistency
+    type: happy_path
+    test_type: [e2e]
+    priority: P0
+    tags: [regression]
+    scenario_ids: [TS-014, TS-015]
+    preconditions: [Toggle role corrected and mapped to user click target, Approved metric definitions and response mapping]
+    steps: [Switch each metric, Apply approved geography and date filters, Inspect map legend and mapped response context]
+    assertions: [selected_metric_and_legend_are_consistent, map_context_matches_applied_filters_and_approved_response_mapping]
+    test_data_ref: JSD-05-H3
+    coverage_note: Does not require values or colors to differ when approved inputs produce equal results.
+  - id: JSD-05-E1
+    title: Missing data or geometry, leaf regions and small targets
+    type: edge_case
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-012, TS-013, TS-016]
+    preconditions: [Approved region fixtures and missing-geometry handling]
+    steps: [Exercise empty-data leaf duplicate-name and small-region fixtures separately, Hover tooltips and select captured targets, Observe final scope]
+    assertions: [region_identity_matches_approved_mapping, missing_geometry_and_leaf_behavior_match_approved_rules, tooltip_does_not_obscure_required_targets]
+    test_data_ref: JSD-05-E1
+    coverage_note: Distinguishes missing geometry from valid regions with zero readings.
+  - id: JSD-05-E2
+    title: Legend boundaries, fullscreen filter changes and missing assets
+    type: edge_case
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-012, TS-014, TS-015, TS-016]
+    preconditions: [Approved thresholds and fullscreen lifecycle, Browser-local asset interception mapped]
+    steps: [Render boundary-value fixtures, Change approved context while fullscreen, Exercise approved Escape and exit behavior, Fail a map asset then recover]
+    assertions: [boundary_colors_match_approved_intervals, fullscreen_context_matches_approved_lifecycle, asset_failure_and_recovery_match_approved_state]
+    test_data_ref: JSD-05-E2
+    coverage_note: Threshold inclusivity and recovery messages remain unset until reviewed.
+test_data:
+  JSD-05-H1: {geographic_fixture: null, legend_definition: null, design_reference: null}
+  JSD-05-H2: {hierarchy_path: null, expected_scope_labels: null}
+  JSD-05-H3: {metrics: [Quantity, Regularity], filter_pairs: null, response_mapping: null}
+  JSD-05-E1: {variants: [no_data, no_children, duplicate_name, small_region, missing_geometry], approved_fixtures: null}
+  JSD-05-E2: {threshold_boundary_fixtures: null, fullscreen_rules: null, asset_pattern: null, recovery_rule: null}

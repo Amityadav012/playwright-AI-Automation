@@ -1,0 +1,95 @@
+module: jalsoochak-dashboard
+flow_id: JSD-06
+flow_name: performance_summary
+priority: P1
+type: [e2e]
+tags: [regression]
+actors: [public]
+environments: {qa: '${QA_BASE_URL}'}
+api_endpoints: []
+ui_pages: [HomePage]
+rbac_checks: []
+source_plan: testplan.md
+scenario_ids: [TS-017, TS-018, TS-019]
+review_gate:
+  status: blocked
+  questions: [OQ-01, OQ-06, OQ-08]
+  reasons: [Assam route absent, Stable row and scroll selectors missing, Sort cycle tie and null rules pending]
+  instruction: Review gates are metadata; do not turn dynamic row labels into fixed numeric expectations.
+execution_context:
+  browser: chrome
+  viewport: {width: 1920, height: 1080}
+  access: anonymous_read_only
+  reset: Fresh context with approved unsorted data and explicit hierarchy scope per case.
+contract_refs:
+  page_id: home
+  path: /
+  element_ids: [state_ut_16, regularity_17, quantity_mld_18, quantity_lpcd_19, household_20]
+missing_selectors: [Stable table rows and cells, Summary scroll container, Current sort indication]
+cases:
+  - id: JSD-06-H1
+    title: Summary columns, records, units and formatting
+    type: happy_path
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-017]
+    preconditions: [Approved schema and formatting, Stable table selectors captured]
+    steps: [Inspect geography and all KPI columns, Compare record identity units and formatting with approved presentation fixtures]
+    assertions: [summary_schema_and_record_format_match_approved_definition, values_remain_associated_with_correct_geography]
+    test_data_ref: JSD-06-H1
+    coverage_note: Includes Quantity LPCD as well as MLD and avoids fixed scrape-time row values.
+  - id: JSD-06-H2
+    title: Summary context follows filters and each hierarchy level
+    type: happy_path
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-018]
+    preconditions: [Approved hierarchy and ranges, UI-to-response mapping approved]
+    steps: [Apply each approved scope and range, Inspect summary geography label and records, Compare selected context with mapped response]
+    assertions: [summary_context_and_records_match_approved_filter_mapping]
+    test_data_ref: JSD-06-H2
+    coverage_note: Tests consistency rather than claiming independent numerical correctness.
+  - id: JSD-06-H3
+    title: Every applicable column sorts records and preserves them
+    type: happy_path
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-019]
+    preconditions: [Unsorted fixture approved, Direction cycle and sort semantics approved]
+    steps: [Capture complete records, Sort each applicable column through approved directions, Compare ordering and record identity/value tuples]
+    assertions: [sort_order_matches_approved_comparator, sort_preserves_record_multiset_and_value_association]
+    test_data_ref: JSD-06-H3
+    coverage_note: Detects numeric versus lexicographic order and rows losing values during sort.
+  - id: JSD-06-E1
+    title: Ties, nulls, zeros, decimals and large grouped numbers
+    type: edge_case
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-017, TS-019]
+    preconditions: [Tie-break null and numeric parsing rules approved, Controlled fixtures available]
+    steps: [Render approved boundary records, Sort all applicable columns, Check ordering formatting and associations]
+    assertions: [ties_nulls_and_numeric_variants_follow_approved_sort_rules]
+    test_data_ref: JSD-06-E1
+    coverage_note: Unspecified tie order is not asserted as deterministic.
+  - id: JSD-06-E2
+    title: Empty and virtualized long tables retain complete records
+    type: edge_case
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-017, TS-018, TS-019]
+    preconditions: [Approved empty and long-table fixtures, Virtualization and scope-change behavior known]
+    steps: [Render empty state separately, Scroll all records in populated fixture, Sort and change scope while scrolled, Inspect alignment and full fixture identity set]
+    assertions: [empty_table_matches_approved_state, all_fixture_records_reachable_without_loss_or_duplication, layout_and_scope_remain_consistent_after_scroll]
+    test_data_ref: JSD-06-E2
+    coverage_note: Visible DOM row count is not used as the total count of a virtualized table.
+test_data:
+  JSD-06-H1: {columns: [Geography, Regularity, Quantity MLD, Quantity LPCD, Household], approved_schema: null}
+  JSD-06-H2: {hierarchy_range_pairs: null, response_mapping: null}
+  JSD-06-H3: {unsorted_records: null, comparator_rules: null, direction_cycle: null}
+  JSD-06-E1: {variants: [equal_keys, null, zero, decimal, large_grouped_number], fixtures: null, tie_rules: null}
+  JSD-06-E2: {empty_fixture: null, long_name_records: null, total_identity_set: null, scope_change_rules: null}

@@ -1,0 +1,95 @@
+module: jalsoochak-dashboard
+flow_id: JSD-10
+flow_name: layout_loading_and_resilience
+priority: P1
+type: [e2e]
+tags: [regression]
+actors: [public]
+environments: {qa: '${QA_BASE_URL}'}
+api_endpoints: []
+ui_pages: [HomePage]
+rbac_checks: []
+source_plan: testplan.md
+scenario_ids: [TS-034, TS-035]
+review_gate:
+  status: blocked
+  questions: [OQ-01, OQ-10, OQ-11, OQ-12]
+  reasons: [Ready loader error and retry selectors missing, Performance SLA and failure states pending, Test-data unavailability classification pending]
+  instruction: Browser-local interception only; do not assume test timeout is SLA or automatically skip product failures.
+execution_context:
+  browser: chrome
+  viewport: {width: 1920, height: 1080}
+  access: anonymous_read_only
+  reset: Fresh context per case; remove all interception and offline settings and reload after failure tests.
+contract_refs:
+  page_id: home
+  path: /
+  element_ids: []
+missing_selectors: [Stable ready state, Loaders, Error states, Retry controls, Layout containers]
+cases:
+  - id: JSD-10-H1
+    title: Agreed Chrome desktop layout and core controls
+    type: happy_path
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-034]
+    preconditions: [Chrome 1920x1080 context, Approved layout and ready state]
+    steps: [Load canonical route at agreed viewport, Inspect header widgets labels tooltips and footer, Exercise approved core controls and fullscreen exit]
+    assertions: [required_content_has_no_unintended_clipping_or_overlap, document_has_no_unintended_horizontal_overflow, approved_core_controls_usable_at_agreed_viewport]
+    test_data_ref: JSD-10-H1
+    coverage_note: Only the approved desktop matrix is covered; no cross-browser or mobile claim.
+  - id: JSD-10-H2
+    title: Load duration under approved cold and warm cache measurement
+    type: happy_path
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-035]
+    preconditions: [Approved load-start and ready-end definition, SLA and sampling rules approved]
+    steps: [Run approved sample count with cold and warm cache separately, Record agreed load milestone durations, Evaluate approved aggregate criterion]
+    assertions: [measured_load_metric_meets_approved_sla]
+    test_data_ref: JSD-10-H2
+    coverage_note: No arbitrary time threshold or networkidle readiness is invented.
+  - id: JSD-10-E1
+    title: Slow requests, offline, timeout and 4xx or 5xx responses
+    type: edge_case
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-035]
+    preconditions: [Read-only request mapping approved, Expected loader error and retry behavior approved]
+    steps: [Simulate each failure independently in browser-local context, Observe loader and final error or retry state, Restore network and use approved recovery path]
+    assertions: [failure_state_matches_approved_error_contract, recovery_restores_approved_loaded_state]
+    test_data_ref: JSD-10-E1
+    coverage_note: Never disrupts server connectivity or asserts an unapproved error string.
+  - id: JSD-10-E2
+    title: Partial widgets, malformed or empty responses and slow map assets
+    type: edge_case
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-035]
+    preconditions: [Approved empty malformed and partial-success states, Browser interception patterns known]
+    steps: [Apply each approved response variant independently, Observe successful and failed widgets and map assets, Restore requests and reload]
+    assertions: [partial_success_and_empty_states_match_approved_rules, malformed_response_is_not_misrepresented_as_valid_zero_data]
+    test_data_ref: JSD-10-E2
+    coverage_note: Explicitly separates valid empty data from failed data retrieval.
+  - id: JSD-10-E3
+    title: Repeated retry, interrupted filters and classification of unavailable data
+    type: edge_case
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-035]
+    preconditions: [Latest-context retry rules approved, Fail-versus-blocked policy approved]
+    steps: [Delay an approved request then change filters, Retry repeatedly using captured control, Restore network and inspect final context, Record unavailable fixture evidence using approved classification]
+    assertions: [final_context_matches_approved_latest_filter_rule, retry_outcome_matches_approved_recovery_contract, failures_classified_without_hiding_product_defects]
+    test_data_ref: JSD-10-E3
+    coverage_note: Does not turn public-service outages into automatic passes or skips.
+test_data:
+  JSD-10-H1: {browser: chrome, viewport: {width: 1920, height: 1080}, approved_layout: null}
+  JSD-10-H2: {start_milestone: null, end_milestone: null, sample_count: null, aggregation_rule: null, sla_ms: null}
+  JSD-10-E1: {variants: [slow, offline, timeout, http_4xx, http_5xx], request_patterns: null, expected_states: null}
+  JSD-10-E2: {variants: [partial_widget_failure, malformed_response, empty_response, slow_map_asset], response_fixtures: null, state_rules: null}
+  JSD-10-E3: {request_patterns: null, retry_rules: null, latest_context_rule: null, failure_classification: null}

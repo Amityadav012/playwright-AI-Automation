@@ -1,0 +1,82 @@
+module: jalsoochak-dashboard
+flow_id: JSD-01
+flow_name: header_and_languages
+priority: P1
+type: [e2e]
+tags: [smoke, regression]
+actors: [public]
+environments:
+  qa: '${QA_BASE_URL}'
+api_endpoints: []
+ui_pages: [HomePage]
+rbac_checks: []
+source_plan: testplan.md
+scenario_ids: [TS-001, TS-002]
+review_gate:
+  status: blocked
+  questions: [OQ-01, OQ-02, OQ-11]
+  reasons: [Canonical route not confirmed, Assam page absent from contract, Language options need selector audit]
+  instruction: Do not generate executable assertions until blockers are resolved; metadata is not a runner-enforced skip.
+execution_context:
+  browser: chrome
+  viewport: {width: 1920, height: 1080}
+  access: anonymous_read_only
+  reset: Fresh context per case; explicit route and baseline language after approval.
+contract_refs:
+  page_id: home
+  path: /
+  element_ids: [jalsoochak_logo_with_text_0, change_language_10]
+cases:
+  - id: JSD-01-H1
+    title: Header logo, title and home destination
+    type: happy_path
+    test_type: [e2e]
+    priority: P1
+    tags: [smoke, regression]
+    scenario_ids: [TS-001]
+    preconditions: [Canonical route approved, Header captured in refreshed contract]
+    steps: [Load the agreed route, Inspect header logo and dashboard title, Inspect the header home link destination]
+    assertions: [header_elements_visible_and_aligned_to_approved_design, home_link_resolves_to_contract_destination]
+    test_data_ref: JSD-01-H1
+    coverage_note: Header-only scoping prevents footer logo duplication from satisfying the assertion.
+  - id: JSD-01-H2
+    title: Each available language applies approved translated labels
+    type: happy_path
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-002]
+    preconditions: [Language option selectors audited, Translated samples approved under OQ-02]
+    steps: [Discover all available language options, Select each option in an isolated context, Compare approved translated labels and selected-language indication]
+    assertions: [every_available_language_selectable, displayed_translation_matches_approved_samples]
+    test_data_ref: JSD-01-H2
+    coverage_note: A closed language menu alone does not prove translation applied.
+  - id: JSD-01-E1
+    title: Language persistence across refresh, route change and second tab
+    type: edge_case
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-002]
+    preconditions: [Persistence scope approved under OQ-02]
+    steps: [Select a non-baseline available language, Refresh within the same context, Navigate to an approved public route and open a second tab]
+    assertions: [language_state_matches_approved_persistence_scope]
+    test_data_ref: JSD-01-E1
+    coverage_note: Observes persistence before reset; does not assume all contexts share language state.
+  - id: JSD-01-E2
+    title: Repeated switching, long translations and keyboard interaction
+    type: edge_case
+    test_type: [e2e]
+    priority: P1
+    tags: [regression]
+    scenario_ids: [TS-001, TS-002]
+    preconditions: [Approved translation samples, Keyboard expectations approved under OQ-11]
+    steps: [Switch languages repeatedly, Select languages using keyboard controls, Inspect long labels and numeral formatting at the agreed viewport]
+    assertions: [final_language_matches_final_selection, translations_do_not_clip_or_overlap, keyboard_focus_matches_approved_behavior]
+    test_data_ref: JSD-01-E2
+    coverage_note: Covers stale language updates and translated layout without creating an unapproved visual baseline.
+test_data:
+  JSD-01-H1: {route: null, approved_header_design: null}
+  JSD-01-H2: {languages: discover_from_selector, approved_translated_samples: null}
+  JSD-01-E1: {language: select_available_non_baseline, persistence_rules: null}
+  JSD-01-E2: {language_sequence: all_available_then_baseline, keyboard_rules: null, numeral_rules: null}
