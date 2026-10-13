@@ -10,3 +10,4 @@ __pycache__/
 *.docx
 node_modules/
 dist/
+allure-results/
