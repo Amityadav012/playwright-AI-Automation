@@ -1,0 +1,16 @@
+{
+  "name": "qa-jalsoochak",
+  "private": true,
+  "scripts": {
+    "test:e2e": "playwright test",
+    "test:visual": "playwright test --grep @visual",
+    "test:visual:update": "playwright test --grep @visual --update-snapshots",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0",
+    "@types/node": "^22.0.0",
+    "dotenv": "^16.4.0",
+    "typescript": "^5.6.0"
+  }
+}

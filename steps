@@ -1,0 +1,7 @@
+1. Install claude code uCl
+2. login to claude code cli 
+3. verify CLI functionality.
+Create a testplan doc from chatgpt or claude based on requirement.
+
+promt :- 
+use the testplan, brainstrom it and write test scripts, dont asume anything ask the clearifying questions and think about the edge cases

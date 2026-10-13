@@ -1,5 +1,6 @@
 .venv/
 .env
+.env.qa
 site_map.json
 *-contract.json
 generated_tests/
