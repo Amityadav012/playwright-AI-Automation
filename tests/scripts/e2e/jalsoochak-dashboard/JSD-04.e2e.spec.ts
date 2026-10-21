@@ -1,17 +1,16 @@
 /**
- * AUTO-GENERATED - do not edit by hand.
+ * Generated from the DSL, then implemented against behaviour observed on the QA environment.
  * Source: testcases/jalsoochak-dashboard/JSD-04.yaml
  * Flow: JSD-04 - kpis_and_previous_period_comparisons
  * Contract: jalsoochak-contract.json v1.2.0
  * Generator: /playwright-gen jalsoochak-dashboard JSD-04
  */
-import { test, type TestInfo } from '@playwright/test'
+import { test, expect, type TestInfo } from '@playwright/test'
 import { allure } from 'allure-playwright'
-import { reviewGate, fixtures } from '../../fixtures/jalsoochak-dashboard/JSD-04.fixtures'
-import { HomePage } from '../../pages/HomePage.page'
+import { fixtures } from '../../fixtures/jalsoochak-dashboard/JSD-04.fixtures'
+import { DashboardPage, KPI_LABELS, STATE_KPI_LABELS, parseNumber } from '../../pages/DashboardPage.page'
 
 const YAML_SOURCE = 'testcases/jalsoochak-dashboard/JSD-04.yaml'
-const BLOCKING_REASON = `JSD-04 blocked: ${reviewGate.questions.join(', ')}; ${reviewGate.reasons.join('; ')}`
 const caseMetadata = {
   'JSD-04-H1': { title: 'Five KPI labels, units, formatting and help', type: 'happy_path', priority: 'P0', tags: ['smoke', 'regression'], scenarioIds: ['TS-009'], coverageNote: "No numeric correctness claim is derived from the dashboard's own values." },
   'JSD-04-H2': { title: 'Previous-period comparison presentation', type: 'happy_path', priority: 'P0', tags: ['regression'], scenarioIds: ['TS-010'], coverageNote: 'Checks presentation of reference inputs rather than claiming backend calculation accuracy.' },
@@ -27,7 +26,6 @@ function annotations(caseId: CaseId) {
     { type: 'scenario_ids', description: caseMetadata[caseId].scenarioIds.join(', ') },
     { type: 'source', description: `${YAML_SOURCE}#${caseId}` },
     { type: 'yaml_source', description: YAML_SOURCE },
-    { type: 'blocking_reason', description: BLOCKING_REASON },
   ]
 }
 
@@ -44,7 +42,6 @@ async function reportMetadata(caseId: CaseId, testInfo: TestInfo): Promise<void>
   await allure.parameter('scenario_ids', metadata.scenarioIds.join(', '))
   await allure.parameter('yaml_source', YAML_SOURCE)
   await allure.parameter('source', `${YAML_SOURCE}#${caseId}`)
-  await allure.parameter('blocking_reason', BLOCKING_REASON)
   await allure.epic('jalsoochak-dashboard')
   await allure.feature('kpis_and_previous_period_comparisons')
   await allure.story(metadata.title)
@@ -55,54 +52,187 @@ async function reportMetadata(caseId: CaseId, testInfo: TestInfo): Promise<void>
 }
 
 test.describe('JSD-04 kpis_and_previous_period_comparisons', { tag: ['@JSD-04', '@jalsoochak-dashboard', '@P0', '@smoke', '@regression'] }, () => {
-  test.fixme(reviewGate.status === 'blocked', BLOCKING_REASON)
+  const NOW = new Date('2026-10-14T10:00:00+05:30')
+  const CURRENT = '2026-10-14'
+  const PREVIOUS = '2026-10-13'
+  const HELP: Record<string, RegExp> = {
+    'Schemes Supplying Water': /supplied water for at least one day/,
+    'Quantity in MLD': /Quantity \(MLD\) = SUM\(Wk\) \/ N/,
+    'Quantity in LPCD': /Quantity \(LPCD\) = SUM\(Wk\) \/ \(SUM\(FHTCi\) x P x N\)/,
+    'Regularity': /Regularity = R \/ S \* 100/,
+    'Critical Schemes': /not supplied water in the last 30 days/,
+  }
+  const FORMAT: Record<string, RegExp> = {
+    'Schemes Supplying Water': /^\d{1,3}(,\d{2})*(,\d{3})?$|^\d+$/,
+    'Quantity in MLD': /^[\d,]+(\.\d+)?$/,
+    'Quantity in LPCD': /^[\d,]+(\.\d+)?$/,
+    'Regularity': /^\d{1,3}\.\d%$/,
+    'Critical Schemes': /^\d{1,3}(,\d{2})*(,\d{3})?$|^\d+$/,
+  }
+  const indian = (n: number) => n.toLocaleString('en-IN')
+
+  /** Serves continuous-schemes counts per date so current and previous periods are controlled. */
+  async function stubSchemeCounts(app: DashboardPage, counts: Record<string, number>): Promise<void> {
+    await app.page.route('**/api/v1/analytics/continuous-schemes?**', route => {
+      const start = new URL(route.request().url()).searchParams.get('start_date')!
+      route.fulfill({ json: { success: true, data: { continuousSchemeCount: counts[start] ?? 0, list: false, page: null, limit: null, startDate: start, endDate: start, daysInRange: 1, schemes: null } } })
+    })
+  }
 
   test('JSD-04-H1: Five KPI labels, units, formatting and help', { tag: ['@JSD-04', '@jalsoochak-dashboard', '@P0', '@smoke', '@regression'], annotation: annotations('JSD-04-H1') }, async ({ page }, testInfo) => {
     await reportMetadata('JSD-04-H1', testInfo)
-    const home = new HomePage(page)
-    await allure.step('Inspect each KPI card', async () => { throw new Error('Unresolved DSL step: Inspect each KPI card. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
-    await allure.step('Compare labels units and formatting with approved UI definitions', async () => { throw new Error('Unresolved DSL step: Compare labels units and formatting with approved UI definitions. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
-    await allure.step("Open the correct card's help control", async () => { throw new Error("Unresolved DSL step: Open the correct card's help control. Requires approved selectors/fixtures; " + BLOCKING_REASON) })
-    await allure.step('Assert: all_approved_kpi_cards_visible', async () => { throw new Error('Unresolved DSL assertion: all_approved_kpi_cards_visible. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
-    await allure.step('Assert: kpi_units_and_formatting_match_approved_definitions', async () => { throw new Error('Unresolved DSL assertion: kpi_units_and_formatting_match_approved_definitions. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
-    await allure.step('Assert: help_matches_selected_kpi', async () => { throw new Error('Unresolved DSL assertion: help_matches_selected_kpi. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
+    const app = new DashboardPage(page)
+    await allure.step('National scope shows the three national KPI cards', async () => {
+      await app.goto('/')
+      for (const label of KPI_LABELS) await expect(app.kpiCard(label)).toBeVisible()
+      await expect(app.main().getByText('Critical Schemes', { exact: true })).toHaveCount(0)
+    })
+    await app.goto('/as?tab=administrative')
+    for (const label of STATE_KPI_LABELS) {
+      await allure.step(`Inspect "${label}" value, unit formatting and help`, async () => {
+        await expect(app.kpiCard(label)).toBeVisible()
+        const { value } = await app.kpi(label)
+        expect(value).toMatch(FORMAT[label])
+        await app.kpiCard(label).getByRole('button', { name: 'More info' }).hover()
+        await expect(page.getByRole('tooltip').filter({ visible: true })).toHaveText(HELP[label])
+        await page.mouse.move(0, 0)
+        await expect(page.getByRole('tooltip').filter({ visible: true })).toHaveCount(0)
+      })
+    }
   })
 
   test('JSD-04-H2: Previous-period comparison presentation', { tag: ['@JSD-04', '@jalsoochak-dashboard', '@P0', '@regression'], annotation: annotations('JSD-04-H2') }, async ({ page }, testInfo) => {
     await reportMetadata('JSD-04-H2', testInfo)
-    const home = new HomePage(page)
-    await allure.step('Load approved equal increasing and decreasing presentation fixtures', async () => { throw new Error('Unresolved DSL step: Load approved equal increasing and decreasing presentation fixtures. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
-    await allure.step('Observe comparison text units and direction indicator', async () => { throw new Error('Unresolved DSL step: Observe comparison text units and direction indicator. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
-    await allure.step('Assert: comparison_presentation_matches_approved_fixture_and_period', async () => { throw new Error('Unresolved DSL assertion: comparison_presentation_matches_approved_fixture_and_period. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
+    const app = new DashboardPage(page)
+    await page.clock.setFixedTime(NOW)
+    for (const [fixture, current, previous, expected] of [
+      ['equal', 4, 4, /^0% vs previous 1 day$/],
+      ['increasing', 10, 5, /^\+?100(\.0)?% vs previous 1 day$/],
+      ['decreasing', 2, 6, /^-66\.7% vs previous 1 day$/],
+    ] as const) {
+      await allure.step(`Comparison for ${fixture} fixture (${previous} -> ${current})`, async () => {
+        await page.unrouteAll({ behavior: 'ignoreErrors' })
+        await stubSchemeCounts(app, { [CURRENT]: current, [PREVIOUS]: previous })
+        await app.goto('/as?tab=administrative')
+        await expect.poll(async () => (await app.kpi('Schemes Supplying Water')).value).toBe(String(current))
+        const kpi = await app.kpi('Schemes Supplying Water')
+        expect(kpi.comparison).toMatch(expected)
+      })
+    }
+    await allure.step('Comparison period follows the applied range length', async () => {
+      await page.unrouteAll({ behavior: 'ignoreErrors' })
+      await app.applyRange('01/10/2026', '05/10/2026')
+      for (const label of STATE_KPI_LABELS.filter(l => l !== 'Critical Schemes')) {
+        expect((await app.kpi(label)).comparison).toMatch(/ vs previous 5 days$/)
+      }
+      expect((await app.kpi('Quantity in LPCD')).comparison).toMatch(/^-?[\d.,]+ LPCD vs previous 5 days$/)
+      expect((await app.kpi('Regularity')).comparison).toMatch(/^[-+]?[\d.]+% vs previous 5 days$/)
+    })
   })
 
   test('JSD-04-H3: KPI context follows applied dates and geography', { tag: ['@JSD-04', '@jalsoochak-dashboard', '@P0', '@regression'], annotation: annotations('JSD-04-H3') }, async ({ page }, testInfo) => {
     await reportMetadata('JSD-04-H3', testInfo)
-    const home = new HomePage(page)
-    await allure.step('Apply each scope and range', async () => { throw new Error('Unresolved DSL step: Apply each scope and range. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
-    await allure.step('Capture read-only response context and KPI rendering', async () => { throw new Error('Unresolved DSL step: Capture read-only response context and KPI rendering. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
-    await allure.step('Compare approved UI-to-response mapping', async () => { throw new Error('Unresolved DSL step: Compare approved UI-to-response mapping. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
-    await allure.step('Assert: kpi_context_matches_applied_filters', async () => { throw new Error('Unresolved DSL assertion: kpi_context_matches_applied_filters. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
-    await allure.step('Assert: displayed_kpis_consistent_with_approved_response_mapping', async () => { throw new Error('Unresolved DSL assertion: displayed_kpis_consistent_with_approved_response_mapping. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
+    const app = new DashboardPage(page)
+    await page.clock.setFixedTime(NOW)
+    await app.goto('/')
+    const counts = (lgd: number, start: string, end: string) => Promise.all([
+      page.waitForResponse(r => r.url().includes(`/continuous-schemes?tenant_id=17&lgd_id=${lgd}&start_date=${start}&end_date=${end}`)),
+      page.waitForResponse(r => r.url().includes(`/critical-schemes?tenant_id=17&lgd_id=${lgd}&start_date=${start}&end_date=${end}`)),
+    ])
+    await allure.step('Apply a range at national scope', async () => {
+      const response = page.waitForResponse(r => r.url().includes('/national/dashboard?start_date=2026-10-01&end_date=2026-10-05'))
+      await app.applyRange('01/10/2026', '05/10/2026')
+      expect((await response).ok()).toBe(true)
+    })
+    for (const [scope, lgd, select] of [['State Assam', 1, 'Assam'], ['District Bajali', 2, 'Bajali']] as const) {
+      await allure.step(`${scope}: KPIs are requested for the scope and range and match the responses`, async () => {
+        const responses = counts(lgd, '2026-10-01', '2026-10-05')
+        await app.selectGeography(select)
+        const [continuous, critical] = await responses
+        await app.closeSearch().click()
+        await app.waitForData()
+        const supplying = (await continuous.json()).data.continuousSchemeCount as number
+        const criticalCount = (await critical.json()).data.criticalSchemeCount as number
+        expect((await app.kpi('Schemes Supplying Water')).value).toBe(indian(supplying))
+        expect((await app.kpi('Critical Schemes')).value).toBe(indian(criticalCount))
+        await expect(app.durationButton()).toHaveText('01/10/2026-05/10/2026')
+      })
+    }
   })
 
   test('JSD-04-E1: Zero, missing and anomalous values and comparisons', { tag: ['@JSD-04', '@jalsoochak-dashboard', '@P0', '@regression'], annotation: annotations('JSD-04-E1') }, async ({ page }, testInfo) => {
     await reportMetadata('JSD-04-E1', testInfo)
-    const home = new HomePage(page)
-    await allure.step('Render each approved value variant in isolated interception', async () => { throw new Error('Unresolved DSL step: Render each approved value variant in isolated interception. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
-    await allure.step('Inspect current and previous values indicators and help', async () => { throw new Error('Unresolved DSL step: Inspect current and previous values indicators and help. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
-    await allure.step('Restore normal requests', async () => { throw new Error('Unresolved DSL step: Restore normal requests. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
-    await allure.step('Assert: value_and_comparison_states_match_approved_display_rules', async () => { throw new Error('Unresolved DSL assertion: value_and_comparison_states_match_approved_display_rules. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
+    const app = new DashboardPage(page)
+    await page.clock.setFixedTime(NOW)
+    await allure.step('Zero current and previous values', async () => {
+      await stubSchemeCounts(app, { [CURRENT]: 0, [PREVIOUS]: 0 })
+      await app.goto('/as?tab=administrative')
+      const kpi = await app.kpi('Schemes Supplying Water')
+      expect(kpi.value).toBe('0')
+      expect(kpi.comparison).toBe('0% vs previous 1 day')
+    })
+    await allure.step('Growth from a zero baseline does not render Infinity or NaN', async () => {
+      await page.unrouteAll({ behavior: 'ignoreErrors' })
+      await stubSchemeCounts(app, { [CURRENT]: 7, [PREVIOUS]: 0 })
+      await page.reload()
+      await app.waitForData()
+      await expect.poll(async () => (await app.kpi('Schemes Supplying Water')).value).toBe('7')
+      const kpi = await app.kpi('Schemes Supplying Water')
+      expect(kpi.comparison).not.toMatch(/Infinity|NaN|undefined/)
+    })
+    await allure.step('Large values use Indian digit grouping', async () => {
+      await page.unrouteAll({ behavior: 'ignoreErrors' })
+      await stubSchemeCounts(app, { [CURRENT]: 1234567, [PREVIOUS]: 1234567 })
+      await page.reload()
+      await app.waitForData()
+      await expect.poll(async () => (await app.kpi('Schemes Supplying Water')).value).toBe('12,34,567')
+    })
+    await allure.step('Assert: no KPI renders an invalid number', async () => {
+      await expect(app.main()).not.toContainText(/NaN|undefined|Infinity|null/)
+      await page.unrouteAll({ behavior: 'ignoreErrors' })
+    })
   })
 
   test('JSD-04-E2: Partial KPI failure, stale responses and refresh during selection', { tag: ['@JSD-04', '@jalsoochak-dashboard', '@P1', '@regression'], annotation: annotations('JSD-04-E2') }, async ({ page }, testInfo) => {
     await reportMetadata('JSD-04-E2', testInfo)
-    const home = new HomePage(page)
-    await allure.step('Delay a previous scope response', async () => { throw new Error('Unresolved DSL step: Delay a previous scope response. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
-    await allure.step('Apply a new scope', async () => { throw new Error('Unresolved DSL step: Apply a new scope. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
-    await allure.step('Fail one mapped widget request', async () => { throw new Error('Unresolved DSL step: Fail one mapped widget request. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
-    await allure.step('Observe final context and recover', async () => { throw new Error('Unresolved DSL step: Observe final context and recover. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
-    await allure.step('Assert: final_kpi_context_matches_approved_latest_selection_rule', async () => { throw new Error('Unresolved DSL assertion: final_kpi_context_matches_approved_latest_selection_rule. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
-    await allure.step('Assert: partial_failure_matches_approved_state_without_false_zero', async () => { throw new Error('Unresolved DSL assertion: partial_failure_matches_approved_state_without_false_zero. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
+    const app = new DashboardPage(page)
+    await page.clock.setFixedTime(NOW)
+    await allure.step('A delayed response for an earlier range does not overwrite the latest selection', async () => {
+      await page.route('**/api/v1/analytics/continuous-schemes?**', async route => {
+        const start = new URL(route.request().url()).searchParams.get('start_date')!
+        // Responses for the earlier range (01/10) arrive late; the latest range (06/10) answers immediately.
+        if (start.startsWith('2026-10-01') || start.startsWith('2026-09-')) await new Promise(r => setTimeout(r, 4000))
+        await route.fulfill({ json: { success: true, data: { continuousSchemeCount: start === '2026-10-01' ? 111 : start === '2026-10-06' ? 222 : 0, list: false } } })
+      })
+      await app.goto('/as?tab=administrative')
+      await app.applyRange('01/10/2026', '01/10/2026')
+      await app.applyRange('06/10/2026', '06/10/2026')
+      await expect.poll(async () => (await app.kpi('Schemes Supplying Water')).value).toBe('222')
+      await page.waitForTimeout(5000)
+      expect((await app.kpi('Schemes Supplying Water')).value).toBe('222')
+    })
+    await allure.step('Refresh during selection restores the applied scope', async () => {
+      await page.unrouteAll({ behavior: 'ignoreErrors' })
+      await app.openSearch()
+      await page.reload()
+      await app.waitForData()
+      await expect(app.durationButton()).toHaveText('06/10/2026')
+      await expect(app.kpiCard('Schemes Supplying Water')).toBeVisible()
+    })
+    await allure.step('Failure of one KPI request leaves the other KPIs intact', async () => {
+      await page.route('**/api/v1/analytics/critical-schemes?**', route => route.fulfill({ status: 500, body: 'error' }))
+      await page.reload()
+      await app.waitForData()
+      for (const label of STATE_KPI_LABELS.filter(l => l !== 'Critical Schemes')) expect((await app.kpi(label)).value).toMatch(FORMAT[label])
+      await expect(app.kpiCard('Critical Schemes')).toBeVisible()
+    })
+    await allure.step('Recover after restoring requests', async () => {
+      await page.unrouteAll({ behavior: 'ignoreErrors' })
+      const critical = page.waitForResponse(r => r.url().includes('/critical-schemes?') && r.url().includes('start_date=2026-10-06'))
+      await page.reload()
+      const count = (await (await critical).json()).data.criticalSchemeCount as number
+      await app.waitForData()
+      expect(parseNumber((await app.kpi('Critical Schemes')).value)).toBe(count)
+    })
   })
 })

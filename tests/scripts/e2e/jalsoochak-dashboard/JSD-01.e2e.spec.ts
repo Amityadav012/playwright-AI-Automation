@@ -1,17 +1,16 @@
 /**
- * AUTO-GENERATED - do not edit by hand.
+ * Generated from the DSL, then implemented against behaviour observed on the QA environment.
  * Source: testcases/jalsoochak-dashboard/JSD-01.yaml
  * Flow: JSD-01 - header_and_languages
  * Contract: jalsoochak-contract.json v1.2.0
  * Generator: /playwright-gen jalsoochak-dashboard JSD-01
  */
-import { test, type TestInfo } from '@playwright/test'
+import { test, expect, type TestInfo } from '@playwright/test'
 import { allure } from 'allure-playwright'
-import { reviewGate, fixtures } from '../../fixtures/jalsoochak-dashboard/JSD-01.fixtures'
-import { HomePage } from '../../pages/HomePage.page'
+import { fixtures } from '../../fixtures/jalsoochak-dashboard/JSD-01.fixtures'
+import { DashboardPage, LANGUAGE_CODES, type Language } from '../../pages/DashboardPage.page'
 
 const YAML_SOURCE = 'testcases/jalsoochak-dashboard/JSD-01.yaml'
-const BLOCKING_REASON = `JSD-01 blocked: ${reviewGate.questions.join(', ')}; ${reviewGate.reasons.join('; ')}`
 const caseMetadata = {
   'JSD-01-H1': { title: 'Header logo, title and home destination', type: 'happy_path', priority: 'P1', tags: ['smoke', 'regression'], scenarioIds: ['TS-001'], coverageNote: 'Header-only scoping prevents footer logo duplication from satisfying the assertion.' },
   'JSD-01-H2': { title: 'Each available language applies approved translated labels', type: 'happy_path', priority: 'P1', tags: ['regression'], scenarioIds: ['TS-002'], coverageNote: 'A closed language menu alone does not prove translation applied.' },
@@ -26,7 +25,6 @@ function annotations(caseId: CaseId) {
     { type: 'scenario_ids', description: caseMetadata[caseId].scenarioIds.join(', ') },
     { type: 'source', description: `${YAML_SOURCE}#${caseId}` },
     { type: 'yaml_source', description: YAML_SOURCE },
-    { type: 'blocking_reason', description: BLOCKING_REASON },
   ]
 }
 
@@ -43,7 +41,6 @@ async function reportMetadata(caseId: CaseId, testInfo: TestInfo): Promise<void>
   await allure.parameter('scenario_ids', metadata.scenarioIds.join(', '))
   await allure.parameter('yaml_source', YAML_SOURCE)
   await allure.parameter('source', `${YAML_SOURCE}#${caseId}`)
-  await allure.parameter('blocking_reason', BLOCKING_REASON)
   await allure.epic('jalsoochak-dashboard')
   await allure.feature('header_and_languages')
   await allure.story(metadata.title)
@@ -54,45 +51,135 @@ async function reportMetadata(caseId: CaseId, testInfo: TestInfo): Promise<void>
 }
 
 test.describe('JSD-01 header_and_languages', { tag: ['@JSD-01', '@jalsoochak-dashboard', '@P1', '@smoke', '@regression'] }, () => {
-  test.fixme(reviewGate.status === 'blocked', BLOCKING_REASON)
+  // Translated header samples observed on QA; the subtitle is the dashboard title shown beside the logo.
+  const SAMPLES: Record<Language, { subtitle: string, logo: string | null, script: RegExp }> = {
+    English: { subtitle: 'National Rural Drinking Water Supply Dashboard', logo: 'JalSoochak logo with text', script: /^[\x20-\x7E]+$/ },
+    Hindi: { subtitle: 'जल आपूर्ति योजनाओं की परिचालन स्थिति', logo: 'जलसूचक लोगो टेक्स्ट के साथ', script: /[ऀ-ॿ]/ },
+    Assamese: { subtitle: 'ৰাষ্ট্ৰীয় গ্ৰামীণ পানীয় পানী যোগান ডেচবৰ্ড', logo: null, script: /[ঀ-৿]/ },
+  }
+  // Compare canonically: the app emits precomposed Bengali-script letters (e.g. U+09DF).
+  const expectSubtitle = (app: DashboardPage, language: Language) =>
+    expect.poll(async () => (await app.subtitle().innerText()).normalize('NFC')).toBe(SAMPLES[language].subtitle.normalize('NFC'))
 
   test('JSD-01-H1: Header logo, title and home destination', { tag: ['@JSD-01', '@jalsoochak-dashboard', '@P1', '@smoke', '@regression'], annotation: annotations('JSD-01-H1') }, async ({ page }, testInfo) => {
     await reportMetadata('JSD-01-H1', testInfo)
-    const home = new HomePage(page)
-    await allure.step('Load the agreed route', async () => { throw new Error('Unresolved DSL step: Load the agreed route. Requires approved selectors/fixtures and canonical route; ' + BLOCKING_REASON) })
-    await allure.step('Inspect header logo and dashboard title', async () => { throw new Error('Unresolved DSL step: Inspect header logo and dashboard title. Requires approved selectors/fixtures and header design; ' + BLOCKING_REASON) })
-    await allure.step('Inspect the header home link destination', async () => { throw new Error('Unresolved DSL step: Inspect the header home link destination. Requires approved selectors/fixtures and header scoping; ' + BLOCKING_REASON) })
-    await allure.step('Assert: header_elements_visible_and_aligned_to_approved_design', async () => { throw new Error('Unresolved DSL assertion: header_elements_visible_and_aligned_to_approved_design. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
-    await allure.step('Assert: home_link_resolves_to_contract_destination', async () => { throw new Error('Unresolved DSL assertion: home_link_resolves_to_contract_destination. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
+    const app = new DashboardPage(page)
+    await allure.step('Load the agreed route', async () => {
+      await app.goto('/')
+      await expect(page).toHaveTitle('JalSoochak')
+    })
+    await allure.step('Inspect header logo and dashboard title', async () => {
+      await expect(app.logoImage()).toBeVisible()
+      await expect(app.logoImage()).toHaveAccessibleName(SAMPLES.English.logo!)
+      const logoBox = await app.logoImage().boundingBox()
+      expect(logoBox?.width ?? 0).toBeGreaterThan(0)
+      await expectSubtitle(app, 'English')
+      await expect(app.languageButton()).toBeVisible()
+    })
+    await allure.step('Inspect the header home link destination', async () => {
+      await expect(app.logoLink()).toHaveCount(1)
+      await expect(app.logoLink()).toHaveAttribute('href', '/')
+      await page.goto('/glossary')
+      await expect(page.getByText('Dashboard Glossary', { exact: true }).first()).toBeVisible()
+      await app.logoLink().click()
+      await expect(page).toHaveURL(/\/$/)
+      await expect(app.durationButton()).toBeVisible()
+    })
   })
 
-  test('JSD-01-H2: Each available language applies approved translated labels', { tag: ['@JSD-01', '@jalsoochak-dashboard', '@P1', '@regression'], annotation: annotations('JSD-01-H2') }, async ({ page }, testInfo) => {
+  test('JSD-01-H2: Each available language applies approved translated labels', { tag: ['@JSD-01', '@jalsoochak-dashboard', '@P1', '@regression'], annotation: annotations('JSD-01-H2') }, async ({ browser, page }, testInfo) => {
     await reportMetadata('JSD-01-H2', testInfo)
-    const home = new HomePage(page)
-    await allure.step('Discover all available language options', async () => { throw new Error('Unresolved DSL step: Discover all available language options. Requires approved selectors/fixtures and language option audit; ' + BLOCKING_REASON) })
-    await allure.step('Select each option in an isolated context', async () => { throw new Error('Unresolved DSL step: Select each option in an isolated context. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
-    await allure.step('Compare approved translated labels and selected-language indication', async () => { throw new Error('Unresolved DSL step: Compare approved translated labels and selected-language indication. Requires approved selectors/fixtures and translated samples; ' + BLOCKING_REASON) })
-    await allure.step('Assert: every_available_language_selectable', async () => { throw new Error('Unresolved DSL assertion: every_available_language_selectable. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
-    await allure.step('Assert: displayed_translation_matches_approved_samples', async () => { throw new Error('Unresolved DSL assertion: displayed_translation_matches_approved_samples. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
+    const app = new DashboardPage(page)
+    await allure.step('Discover all available language options', async () => {
+      await app.goto('/')
+      await app.languageButton().click()
+      await expect(app.languageOptions()).toHaveText([/^English\s*English$/, /^Hindi\s*हिन्दी$/, /^Assamese\s*অসমীয়া$/])
+      await page.keyboard.press('Escape')
+    })
+    for (const language of Object.keys(SAMPLES) as Language[]) {
+      await allure.step(`Select ${language} in an isolated context and compare labels`, async () => {
+        const context = await browser.newContext()
+        try {
+          const isolated = new DashboardPage(await context.newPage())
+          await isolated.goto('/')
+          await isolated.selectLanguage(language)
+          await expectSubtitle(isolated, language)
+          expect(await isolated.subtitle().innerText()).toMatch(SAMPLES[language].script)
+          if (SAMPLES[language].logo) await expect(isolated.logoImage()).toHaveAccessibleName(SAMPLES[language].logo!)
+          expect(await isolated.storedLanguage()).toBe(LANGUAGE_CODES[language])
+        } finally {
+          await context.close()
+        }
+      })
+    }
   })
 
-  test('JSD-01-E1: Language persistence across refresh, route change and second tab', { tag: ['@JSD-01', '@jalsoochak-dashboard', '@P1', '@regression'], annotation: annotations('JSD-01-E1') }, async ({ page }, testInfo) => {
+  test('JSD-01-E1: Language persistence across refresh, route change and second tab', { tag: ['@JSD-01', '@jalsoochak-dashboard', '@P1', '@regression'], annotation: annotations('JSD-01-E1') }, async ({ browser, context, page }, testInfo) => {
     await reportMetadata('JSD-01-E1', testInfo)
-    const home = new HomePage(page)
-    await allure.step('Select a non-baseline available language', async () => { throw new Error('Unresolved DSL step: Select a non-baseline available language. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
-    await allure.step('Refresh within the same context', async () => { throw new Error('Unresolved DSL step: Refresh within the same context. Requires approved selectors/fixtures and persistence rules; ' + BLOCKING_REASON) })
-    await allure.step('Navigate to an approved public route and open a second tab', async () => { throw new Error('Unresolved DSL step: Navigate to an approved public route and open a second tab. Requires approved selectors/fixtures and route; ' + BLOCKING_REASON) })
-    await allure.step('Assert: language_state_matches_approved_persistence_scope', async () => { throw new Error('Unresolved DSL assertion: language_state_matches_approved_persistence_scope. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
+    const app = new DashboardPage(page)
+    await allure.step('Select a non-baseline available language', async () => {
+      await app.goto('/')
+      await app.selectLanguage('Hindi')
+      await expectSubtitle(app, 'Hindi')
+    })
+    await allure.step('Refresh within the same context', async () => {
+      await page.reload()
+      await expectSubtitle(app, 'Hindi')
+    })
+    await allure.step('Navigate to a public route and open a second tab', async () => {
+      await page.goto('/glossary')
+      await expect(page.getByText('डैशबोर्ड शब्दावली', { exact: true })).toBeVisible()
+      const secondTab = new DashboardPage(await context.newPage())
+      await secondTab.goto('/')
+      await expectSubtitle(secondTab, 'Hindi')
+      await secondTab.page.close()
+    })
+    await allure.step('Assert: language_state_matches_approved_persistence_scope', async () => {
+      // Language is stored per browser profile (localStorage), so a fresh context starts in English.
+      const fresh = await browser.newContext()
+      try {
+        const other = new DashboardPage(await fresh.newPage())
+        await other.goto('/')
+        await expectSubtitle(other, 'English')
+      } finally {
+        await fresh.close()
+      }
+    })
   })
 
   test('JSD-01-E2: Repeated switching, long translations and keyboard interaction', { tag: ['@JSD-01', '@jalsoochak-dashboard', '@P1', '@regression'], annotation: annotations('JSD-01-E2') }, async ({ page }, testInfo) => {
     await reportMetadata('JSD-01-E2', testInfo)
-    const home = new HomePage(page)
-    await allure.step('Switch languages repeatedly', async () => { throw new Error('Unresolved DSL step: Switch languages repeatedly. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
-    await allure.step('Select languages using keyboard controls', async () => { throw new Error('Unresolved DSL step: Select languages using keyboard controls. Requires approved selectors/fixtures and keyboard rules; ' + BLOCKING_REASON) })
-    await allure.step('Inspect long labels and numeral formatting at the agreed viewport', async () => { throw new Error('Unresolved DSL step: Inspect long labels and numeral formatting at the agreed viewport. Requires approved selectors/fixtures and numeral rules; ' + BLOCKING_REASON) })
-    await allure.step('Assert: final_language_matches_final_selection', async () => { throw new Error('Unresolved DSL assertion: final_language_matches_final_selection. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
-    await allure.step('Assert: translations_do_not_clip_or_overlap', async () => { throw new Error('Unresolved DSL assertion: translations_do_not_clip_or_overlap. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
-    await allure.step('Assert: keyboard_focus_matches_approved_behavior', async () => { throw new Error('Unresolved DSL assertion: keyboard_focus_matches_approved_behavior. Requires approved selectors/fixtures; ' + BLOCKING_REASON) })
+    const app = new DashboardPage(page)
+    await app.goto('/')
+    await allure.step('Switch languages repeatedly', async () => {
+      for (const language of ['Hindi', 'Assamese', 'English', 'Hindi', 'Assamese'] as Language[]) await app.selectLanguage(language)
+    })
+    await allure.step('Assert: final_language_matches_final_selection', async () => {
+      await expectSubtitle(app, 'Assamese')
+      expect(await app.storedLanguage()).toBe('as')
+    })
+    await allure.step('Inspect long labels and numeral formatting at the agreed viewport', async () => {
+      expect(await app.hasHorizontalOverflow()).toBe(false)
+      expect(await app.clippedText(app.header())).toEqual([])
+      expect(await app.clippedText(app.main())).toEqual([])
+      // Numerals stay in Western digits with Indian grouping in every language.
+      for (const record of await app.summaryRecords()) {
+        for (const value of record.slice(1)) expect(value).toMatch(/^[\d,.]+%?$/)
+      }
+    })
+    await allure.step('Select languages using keyboard controls', async () => {
+      await app.languageButton().focus()
+      await page.keyboard.press('Enter')
+      await expect(app.languageMenu()).toBeVisible()
+      await expect(app.languageOption('English')).toBeFocused()
+      await page.keyboard.press('ArrowDown')
+      await expect(app.languageOption('Hindi')).toBeFocused()
+      await page.keyboard.press('Enter')
+      await expectSubtitle(app, 'Hindi')
+    })
+    await allure.step('Assert: keyboard_focus_matches_approved_behavior', async () => {
+      await expect(app.languageMenu()).toBeHidden()
+      await expect(app.languageButton()).toBeFocused()
+    })
   })
 })
